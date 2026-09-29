@@ -15,6 +15,7 @@ export type ContinuityInput = {
 
 const MAX_TASK_CHARS = 240
 const MAX_DECISIONS = 8
+const MAX_COMMAND_CHARS = 200
 
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text
@@ -50,15 +51,20 @@ export function buildContinuityBlock(input: ContinuityInput): string {
   const task = (state?.lastTask || lastUserText(messages) || "").trim()
   const decisions = (state?.decisions ?? []).slice(-MAX_DECISIONS)
   const files = state?.activeFiles ?? []
+  const lastCommand = (state?.lastCommand ?? "").trim()
   const hasOccupancy = state?.occupancy !== undefined && Number.isFinite(state.occupancy)
 
   // Nothing worth carrying → inject nothing (an agent-only block is noise).
-  if (!task && decisions.length === 0 && files.length === 0 && !hasOccupancy) return ""
+  if (!task && !lastCommand && decisions.length === 0 && files.length === 0 && !hasOccupancy) {
+    return ""
+  }
 
   const lines: string[] = ["[ctx-guard continuity]"]
   if (agent) lines.push(`Agent mode: ${agent}`)
 
   if (task) lines.push(`Current task: ${truncate(task, MAX_TASK_CHARS)}`)
+
+  if (lastCommand) lines.push(`Last command: ${truncate(lastCommand, MAX_COMMAND_CHARS)}`)
 
   if (decisions.length > 0) {
     lines.push("Recent decisions:")

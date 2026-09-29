@@ -24,6 +24,7 @@ test("asContinuity: fills safe defaults for a partial record", () => {
     limit: undefined,
     occupancy: undefined,
     updatedAt: undefined,
+    lastCommand: undefined,
   })
 })
 
@@ -37,6 +38,7 @@ test("asContinuity: preserves a complete record", () => {
     limit: 100,
     occupancy: 0.1,
     updatedAt: 123,
+    lastCommand: "npm test",
   }
   assert.deepEqual(asContinuity(input), input)
 })

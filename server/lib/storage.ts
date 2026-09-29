@@ -18,6 +18,8 @@ export type ContinuityState = {
   limit?: number
   occupancy?: number
   updatedAt?: number
+  /** Truncated last target-tool command, recorded on execute.before. */
+  lastCommand?: string
 }
 
 /** Stable storage key for a session's continuity record. */
@@ -36,6 +38,7 @@ export function asContinuity(value: unknown): ContinuityState | undefined {
     limit: typeof v.limit === "number" ? v.limit : undefined,
     occupancy: typeof v.occupancy === "number" ? v.occupancy : undefined,
     updatedAt: typeof v.updatedAt === "number" ? v.updatedAt : undefined,
+    lastCommand: typeof v.lastCommand === "string" ? v.lastCommand : undefined,
   }
 }
 

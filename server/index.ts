@@ -1,11 +1,15 @@
 /**
- * ctx-guard — server plugin (MVP: compaction + occupancy + continuity).
+ * ctx-guard — server plugin (compaction + occupancy + continuity + tool hooks).
  *
  * Cache-preservation invariant (the whole point of this plugin):
- *   The ONLY surfaces allowed to alter content are the `compaction` hook
- *   (event.system.push) and, in a later phase, tool.execute.after.
+ *   The ONLY surfaces allowed to alter content are:
+ *     1. the `compaction` hook (event.system.push), and
+ *     2. `tool.hook("execute.after")` on `status: "completed"` (event.result),
+ *        which rewrites a result *about to be committed as new content* — never
+ *        anything already in the transcript.
  *   The `context` hook is strictly READ-ONLY — it must never touch
- *   event.messages / event.system / event.tools.
+ *   event.messages / event.system / event.tools. `event.input` in the tool
+ *   hooks is readonly; it is never mutated.
  *
  * The default export is a plain `{ id, setup }` object (what `Plugin.define`
  * returns). All SDK references are `import type`, so nothing is resolved at
@@ -18,6 +22,21 @@ import type { Model } from "@opencode/schema/model"
 import { buildContinuityBlock } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
 import { loadContinuity, saveContinuity, type ContinuityState } from "./lib/storage.ts"
+import {
+  COMPRESSION_ENABLED,
+  COMPRESSION_OPTIONS,
+  DEDUP_ENABLED,
+  DEDUP_MARKER,
+  DEDUP_MIN_CHARS,
+  commandOf,
+  compressResult,
+  isTargetTool,
+  loadRecentSignatures,
+  replaceResultText,
+  saveRecentSignatures,
+  signatureOf,
+  textLengthOf,
+} from "./lib/toolhooks.ts"
 
 /** Used only if the model's real context limit cannot be resolved. */
 const DEFAULT_CONTEXT_LIMIT = 200_000
@@ -104,11 +123,64 @@ const ctxGuard: Plugin.Plugin = {
           limit: reading.limit,
           occupancy: reading.occupancy,
           updatedAt: Date.now(),
+          lastCommand: previous?.lastCommand,
         }
         await saveContinuity(ctx.storage, event.sessionID, next)
 
         // INVARIANT: nothing above writes to event.messages / event.system /
         // event.tools. Keep it that way.
+      }),
+    )
+
+    // --- Tool hooks: bash/shell output compression + dedup --------------------
+    // `execute.before` (read-only): remember the last command for the
+    // continuity block. `event.input` is never mutated.
+    registrations.push(
+      await ctx.tool.hook("execute.before", async (event) => {
+        if (!isTargetTool(event.tool)) return
+        const command = commandOf(event.input)
+        if (!command) return
+
+        const previous = await loadContinuity(ctx.storage, event.sessionID)
+        await saveContinuity(ctx.storage, event.sessionID, {
+          lastTask: previous?.lastTask ?? "",
+          decisions: previous?.decisions ?? [],
+          activeFiles: previous?.activeFiles ?? [],
+          agent: event.agent,
+          tokens: previous?.tokens,
+          limit: previous?.limit,
+          occupancy: previous?.occupancy,
+          updatedAt: Date.now(),
+          lastCommand: command,
+        })
+      }),
+    )
+
+    registrations.push(
+      await ctx.tool.hook("execute.after", async (event) => {
+        if (!isTargetTool(event.tool)) return
+        if (event.status !== "completed") return // never touch errors
+
+        const text = textLengthOf(event.result)
+        if (text <= 0) return // structured output only → nothing to compress
+
+        // Dedup first: a repeated large result collapses to a marker, and is
+        // not re-added to the history (it is already there).
+        if (DEDUP_ENABLED && text > DEDUP_MIN_CHARS) {
+          const signature = signatureOf(event.tool, event.input)
+          const recent = await loadRecentSignatures(ctx.storage, event.sessionID)
+          if (recent.includes(signature)) {
+            event.result = replaceResultText(event.result, DEDUP_MARKER)
+            return
+          }
+          await saveRecentSignatures(ctx.storage, event.sessionID, [...recent, signature])
+        }
+
+        // Then compress: head + tail with an omission marker. Only the result
+        // that is about to be committed is rewritten — never the transcript.
+        if (COMPRESSION_ENABLED) {
+          event.result = compressResult(event.result, COMPRESSION_OPTIONS)
+        }
       }),
     )
 

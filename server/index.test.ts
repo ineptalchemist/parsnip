@@ -9,6 +9,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import ctxGuard from "./index.ts"
+import { DEDUP_MARKER } from "./lib/toolhooks.ts"
 
 type AnyRecord = Record<string, any>
 
@@ -31,6 +32,13 @@ function makeHarness() {
         hooks[name] = callback
         return { dispose: async () => void disposed.push(`session.hook:${name}`) }
       },
+    },
+    tool: {
+      hook: async (name: string, callback: (input: AnyRecord) => unknown) => {
+        hooks[name] = callback
+        return { dispose: async () => void disposed.push(`tool.hook:${name}`) }
+      },
+      list: async () => [],
     },
     storage: {
       get: async (key: string) => store.get(key),
@@ -65,6 +73,8 @@ test("setup registers compaction + context hooks and a model transform", async (
 
   assert.equal(typeof h.hooks.compaction, "function")
   assert.equal(typeof h.hooks.context, "function")
+  assert.equal(typeof h.hooks["execute.before"], "function")
+  assert.equal(typeof h.hooks["execute.after"], "function")
   assert.equal(h.transforms.length, 1)
 })
 
@@ -77,6 +87,8 @@ test("setup returns a cleanup that disposes every registration", async () => {
     "model.transform",
     "session.hook:compaction",
     "session.hook:context",
+    "tool.hook:execute.after",
+    "tool.hook:execute.before",
   ])
 })
 
@@ -150,3 +162,118 @@ test("compaction hook: injects nothing when there is no continuity to carry", as
 
   assert.equal(event.system.length, 1, "no empty continuity part should be pushed")
 })
+
+// --- Phase 2: tool hooks ----------------------------------------------------
+
+function toolEvent(overrides: AnyRecord = {}) {
+  return {
+    tool: "shell",
+    sessionID: "ses_test",
+    agent: "build",
+    messageID: "msg_test",
+    id: "call_test",
+    input: { command: "printf big" },
+    status: "completed",
+    result: {
+      content: [{ type: "text", text: "x".repeat(6000) }],
+      output: { exit: 0, truncated: false },
+      metadata: { ok: true },
+    },
+    ...overrides,
+  }
+}
+
+test("execute.after: compresses a large shell result, touching only content", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const event = toolEvent()
+  const inputSnapshot = JSON.stringify(event.input)
+  const outputRef = event.result.output
+  const metadataRef = event.result.metadata
+
+  await h.hooks["execute.after"](event)
+
+  const text = (event.result.content as Array<AnyRecord>)[0].text
+  assert.match(text, /\[ctx-guard: \d+ chars omitted\]/)
+  assert.ok(text.length < 3000, `expected a bounded placeholder, got ${text.length} chars`)
+  assert.equal(text.slice(0, 1600), "x".repeat(1600))
+  assert.ok(text.endsWith("x".repeat(1200)))
+  assert.equal(JSON.stringify(event.input), inputSnapshot, "execute.after mutated event.input")
+  assert.equal(event.result.output, outputRef, "structured output must be untouched")
+  assert.equal(event.result.metadata, metadataRef, "metadata must be untouched")
+})
+
+test("execute.after: leaves small output untouched", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const event = toolEvent({
+    result: { content: [{ type: "text", text: "tiny output" }], output: { exit: 0 } },
+  })
+  const before = JSON.stringify(event.result)
+  await h.hooks["execute.after"](event)
+
+  assert.equal(JSON.stringify(event.result), before)
+})
+
+test("execute.after: ignores errors and non-target tools", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const failed = toolEvent({ status: "error", error: { message: "boom" } })
+  await h.hooks["execute.after"](failed)
+  assert.equal((failed.result.content as Array<AnyRecord>)[0].text, "x".repeat(6000))
+
+  const other = toolEvent({ tool: "read" })
+  await h.hooks["execute.after"](other)
+  assert.equal((other.result.content as Array<AnyRecord>)[0].text, "x".repeat(6000))
+})
+
+test("execute.after: suppresses a repeated identical large result", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const first = toolEvent()
+  await h.hooks["execute.after"](first)
+  assert.match((first.result.content as Array<AnyRecord>)[0].text, /chars omitted/)
+
+  const second = toolEvent()
+  await h.hooks["execute.after"](second)
+  assert.equal((second.result.content as Array<AnyRecord>)[0].text, DEDUP_MARKER)
+
+  // A different command is not suppressed.
+  const third = toolEvent({ input: { command: "printf other" } })
+  await h.hooks["execute.after"](third)
+  assert.match((third.result.content as Array<AnyRecord>)[0].text, /chars omitted/)
+})
+
+test("execute.after: keeps its dedup memory in storage, not module state", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.after"](toolEvent())
+  const history = h.store.get("session:ses_test:toolHistory") as string[]
+  assert.equal(history.length, 1)
+  assert.ok(history[0].startsWith("shell:"))
+})
+
+test("execute.before: records the last command without mutating input", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const event = toolEvent({ input: { command: "npm test --silent" } })
+  const inputSnapshot = JSON.stringify(event.input)
+  await h.hooks["execute.before"](event)
+
+  assert.equal(JSON.stringify(event.input), inputSnapshot, "execute.before mutated event.input")
+  const stored = h.store.get("session:ses_test") as AnyRecord
+  assert.equal(stored.lastCommand, "npm test --silent")
+
+  // A non-target tool records nothing.
+  const readEvent = toolEvent({ tool: "read", input: { filePath: "/x" } })
+  await h.hooks["execute.before"](readEvent)
+  const after = h.store.get("session:ses_test") as AnyRecord
+  assert.equal(after.lastCommand, "npm test --silent")
+})
+

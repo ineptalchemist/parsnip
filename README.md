@@ -11,30 +11,44 @@ window.
 
 ## Invariant
 
-> The **only** surfaces allowed to alter content are the `compaction` hook
-> (`event.system.push`, and later tool.execute.after). The `context` hook is
-> **strictly read-only** — it must never touch `event.messages`,
-> `event.system`, or `event.tools`.
+> The **only** surfaces allowed to alter content are:
+> 1. the `compaction` hook (`event.system.push`), and
+> 2. `tool.hook("execute.after")` on `status: "completed"` (`event.result` only),
+>    which rewrites a result *about to be committed as new content*.
+>
+> The `context` hook is **strictly read-only** — it must never touch
+> `event.messages`, `event.system`, or `event.tools`. `event.input` in the tool
+> hooks is readonly and is never mutated.
 
 This is the whole point of the plugin. It is enforced by review, not by the
 compiler.
 
-## Status: Phase 1 (server core) — MVP
+## Status: Phase 2 (tool hooks)
 
 Implemented (server side):
 
 - **Compaction injection** — `ctx.session.hook("compaction")` pushes a
-  mode-aware continuity block (agent mode, current task, recent decisions,
-  active files, last occupancy reading) into the compaction system prompt. It
-  does **not** set `event.result`, so the main model stays the summarizer.
+  mode-aware continuity block (agent mode, current task, last command, recent
+  decisions, active files, last occupancy reading) into the compaction system
+  prompt. It does **not** set `event.result`, so the main model stays the
+  summarizer.
 - **Occupancy scoring** — `ctx.session.hook("context")` estimates tokens
   (`chars / 4`) across system + messages + tools and computes occupancy against
   the model's real context limit. Strictly read-only.
 - **Continuity state** — persisted per session via `ctx.storage`, so it survives
   plugin hot reloads (module state does not).
+- **Tool-output compression** — `ctx.tool.hook("execute.after")` replaces an
+  oversized `shell`/`bash` result with `head + "… [ctx-guard: N chars omitted] …"
+  + tail` before it is committed. Defaults: 4000-char threshold, 1600 head,
+  1200 tail (`COMPRESSION_ENABLED`).
+- **Duplicate suppression** — a repeated identical large result (> 1000 chars,
+  same tool + arguments) collapses to a marker. The per-session signature ring
+  lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16
+  (`DEDUP_ENABLED`).
 
-Not yet implemented: tool hooks (Phase 2), structural cleanup (Phase 3), RPC +
-`token_status` (Phase 4), CLI plugin (Phase 5).
+Not yet implemented: structural cleanup (Phase 3), RPC + `token_status`
+(Phase 4), CLI plugin (Phase 5).
+
 
 ## Layout
 
@@ -44,6 +58,7 @@ server/
   lib/compaction.ts     buildContinuityBlock (pure)
   lib/quality.ts        token estimate + occupancy (pure)
   lib/storage.ts        per-session continuity (ctx.storage)
+  lib/toolhooks.ts      compression + dedup + signatures (pure)
   *.test.ts             node:test suites (no framework)
 ```
 
@@ -81,3 +96,14 @@ npm test          # node --test 'server/**/*.test.ts' (Node strips types; no bui
   trusted.
 - Do not disable native auto-compaction — this plugin is designed to work with
   it.
+- **Native `tool_output` truncation runs first.** OpenCode's own
+  `tool_output.max_lines` / `max_bytes` (here 500 lines / 20000 bytes) caps a
+  result *before* `execute.after` sees it, so compression only earns its keep on
+  results that are long but few-lined (diffs, minified JSON, long log lines).
+  Duplicates are still caught either way.
+- `file` content parts, `result.output`, and `result.metadata` are never
+  touched — only text content is rewritten.
+- Where does the tool-hook invoke come from? `ctx.tool.hook` — the two events are
+  `execute.before` (read-only; here it records the last command for continuity)
+  and `execute.after` (the only mutating one).
+
