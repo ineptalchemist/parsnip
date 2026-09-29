@@ -1,0 +1,13 @@
+{
+  "name": "ctx-guard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cache-preserving context manager for OpenCode V2 (server plugin)",
+  "scripts": {
+    "test": "node --test 'server/**/*.test.ts'"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.19"
+  }
+}
