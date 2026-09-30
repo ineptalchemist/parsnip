@@ -8,7 +8,7 @@
  */
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import ctxGuard from "./index.ts"
+import ctxGuard, { guarded } from "./index.ts"
 import { DEDUP_MARKER } from "./lib/toolhooks.ts"
 
 type AnyRecord = Record<string, any>
@@ -16,8 +16,14 @@ type AnyRecord = Record<string, any>
 function makeHarness() {
   const hooks: AnyRecord = {}
   const transforms: Array<(editor: AnyRecord) => void> = []
+  const mcpTransforms: Array<(editor: AnyRecord) => void> = []
+  const skillTransforms: Array<(editor: AnyRecord) => void> = []
+  const mcpReloads: string[] = []
   const store = new Map<string, unknown>()
   const disposed: string[] = []
+
+  const mcpServers: AnyRecord[] = []
+  const skillCatalog: AnyRecord[] = []
 
   const ctx: AnyRecord = {
     model: {
@@ -26,6 +32,21 @@ function makeHarness() {
         return { dispose: async () => void disposed.push("model.transform") }
       },
       list: async () => ({ data: [] }),
+    },
+    mcp: {
+      transform: async (callback: (editor: AnyRecord) => void) => {
+        mcpTransforms.push(callback)
+        return { dispose: async () => void disposed.push("mcp.transform") }
+      },
+      list: async () => ({ location: null, data: mcpServers }),
+      reload: async () => void mcpReloads.push("reload"),
+    },
+    skill: {
+      transform: async (callback: (editor: AnyRecord) => void) => {
+        skillTransforms.push(callback)
+        return { dispose: async () => void disposed.push("skill.transform") }
+      },
+      list: async () => ({ location: null, data: skillCatalog }),
     },
     session: {
       hook: async (name: string, callback: (input: AnyRecord) => unknown) => {
@@ -48,7 +69,60 @@ function makeHarness() {
     },
   }
 
-  return { ctx, hooks, transforms, store, disposed }
+  return {
+    ctx,
+    hooks,
+    transforms,
+    mcpTransforms,
+    skillTransforms,
+    mcpReloads,
+    mcpServers,
+    skillCatalog,
+    store,
+    disposed,
+  }
+}
+
+/** Drives the MCP transform with a fake editor over `entries`. */
+function mcpEditor(entries: Array<[string, AnyRecord]>) {
+  const map = new Map(entries.map(([name, config]) => [name, { ...config }]))
+  const removed: string[] = []
+  return {
+    map,
+    removed,
+    editor: {
+      list: () => [...map.entries()],
+      get: (name: string) => map.get(name),
+      set: (name: string, config: AnyRecord) => void map.set(name, config),
+      update: (name: string, update: (config: AnyRecord) => void) => {
+        const config = map.get(name)
+        assert.ok(config, `mcp editor update for unknown server ${name}`)
+        update(config)
+      },
+      remove: (name: string) => {
+        removed.push(name)
+        map.delete(name)
+      },
+    },
+  }
+}
+
+/** Drives the skill transform with a fake editor. */
+function skillEditor(entries: AnyRecord[] = []) {
+  return {
+    editor: {
+      list: () => entries,
+      get: (id: string) => entries.find((info) => info.id === id),
+      add: (skill: AnyRecord) => void entries.push(skill),
+      update: (id: string, update: (skill: AnyRecord) => void) => {
+        const info = entries.find((entry) => entry.id === id)
+        if (info) update(info)
+      },
+      remove: () => {
+        throw new Error("ctx-guard must never remove a skill")
+      },
+    },
+  }
 }
 
 function contextEvent(overrides: AnyRecord = {}) {
@@ -76,6 +150,8 @@ test("setup registers compaction + context hooks and a model transform", async (
   assert.equal(typeof h.hooks["execute.before"], "function")
   assert.equal(typeof h.hooks["execute.after"], "function")
   assert.equal(h.transforms.length, 1)
+  assert.equal(h.mcpTransforms.length, 1)
+  assert.equal(h.skillTransforms.length, 1)
 })
 
 test("setup returns a cleanup that disposes every registration", async () => {
@@ -84,9 +160,11 @@ test("setup returns a cleanup that disposes every registration", async () => {
   assert.equal(typeof cleanup, "function")
   await cleanup!()
   assert.deepEqual(h.disposed.sort(), [
+    "mcp.transform",
     "model.transform",
     "session.hook:compaction",
     "session.hook:context",
+    "skill.transform",
     "tool.hook:execute.after",
     "tool.hook:execute.before",
   ])
@@ -275,5 +353,221 @@ test("execute.before: records the last command without mutating input", async ()
   await h.hooks["execute.before"](readEvent)
   const after = h.store.get("session:ses_test") as AnyRecord
   assert.equal(after.lastCommand, "npm test --silent")
+})
+
+// --- Phase 3: fail-safe hooks ----------------------------------------------
+
+/** Replaces console.error for the duration of `run`, capturing the output. */
+async function captureConsoleError(run: () => Promise<void>): Promise<string[]> {
+  const original = console.error
+  const lines: string[] = []
+  console.error = (...args: unknown[]) => void lines.push(args.map(String).join(" "))
+  try {
+    await run()
+  } finally {
+    console.error = original
+  }
+  return lines
+}
+
+test("setup wiring: one failing registration cannot break the plugin load", async () => {
+  const h = makeHarness()
+  // Simulate a domain API that rejects (the class of failure that used to fail
+  // the whole plugin load, `failed to load plugin`, and break every session).
+  h.ctx.mcp.transform = async () => {
+    throw new Error("mcp domain unavailable")
+  }
+
+  const lines = await captureConsoleError(async () => {
+    await ctxGuard.setup(h.ctx) // must not throw
+  })
+
+  assert.match(lines.join("\n"), /\[ctx-guard\] mcp\.transform registration failed \(skipped\)/)
+  // Everything else still registered.
+  assert.equal(typeof h.hooks.context, "function")
+  assert.equal(typeof h.hooks["execute.before"], "function")
+  assert.equal(h.transforms.length, 1)
+  assert.equal(h.skillTransforms.length, 1)
+
+  // And the surviving hooks still work.
+  const event = contextEvent()
+  await h.hooks.context(event)
+  assert.ok(h.store.has("session:ses_test:structure"))
+})
+
+test("guarded: a throwing body never rejects and is logged", async () => {
+  const lines = await captureConsoleError(async () => {
+    const hook = guarded("test.hook", async () => {
+      throw new Error("kaboom")
+    })
+    await hook()
+  })
+
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /\[ctx-guard\] test\.hook failed \(ignored\)/)
+  assert.match(lines[0], /kaboom/)
+})
+
+test("guarded: passes arguments through and resolves on success", async () => {
+  const seen: unknown[] = []
+  const hook = guarded("test.hook", async (a: string, b: number) => {
+    seen.push(a, b)
+  })
+  await hook("x", 1)
+  assert.deepEqual(seen, ["x", 1])
+})
+
+test("guarded: swallows a synchronous throw too", async () => {
+  const lines = await captureConsoleError(async () => {
+    const hook = guarded("test.sync", () => {
+      throw new Error("sync boom")
+    })
+    await hook()
+  })
+  assert.match(lines[0], /sync boom/)
+})
+
+test("setup wiring: a hook whose storage throws cannot break the session", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  // The context hook does storage work on every request: make that fail.
+  h.ctx.storage.set = async () => {
+    throw new Error("storage down")
+  }
+  h.ctx.storage.get = async () => {
+    throw new Error("storage down")
+  }
+
+  const event = contextEvent()
+  const snapshot = JSON.stringify(event)
+  const lines = await captureConsoleError(async () => {
+    await h.hooks.context(event) // must not reject
+    await h.hooks["execute.before"](toolEvent())
+    await h.hooks["execute.after"](toolEvent())
+  })
+
+  assert.equal(JSON.stringify(event), snapshot, "a failed hook must not touch the event")
+  assert.ok(lines.length >= 3, `expected every hook to log its failure, got ${lines.length}`)
+  assert.ok(lines.every((line) => line.includes("[ctx-guard]")))
+})
+
+// --- Phase 3: structural report --------------------------------------------
+
+function seedCatalog(h: ReturnType<typeof makeHarness>) {
+  h.mcpServers.push(
+    { name: "basic-memory", status: { status: "connected" } },
+    { name: "firecrawl", status: { status: "connected" } },
+    { name: "filterboy", status: { status: "failed", error: "spawn failed" } },
+    { name: "n8n", status: { status: "failed", error: "unreachable" } },
+    { name: "parallel", status: { status: "connected" } },
+  )
+  h.skillCatalog.push(
+    { id: "opencode", name: "OpenCode", description: "", path: "/builtin/opencode.md", content: "" },
+    { id: "report", name: "Report", description: "", path: "/builtin/report.md", content: "" },
+  )
+}
+
+test("mcp/skill transforms snapshot the catalog read-only", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { map, removed, editor } = mcpEditor([
+    ["basic-memory", { type: "local", command: ["basic-memory", "mcp"] }],
+    ["filterboy", { type: "local", command: ["filterboy-mcp"] }],
+    ["parallel", { type: "remote", url: "https://search.parallel.ai/mcp", oauth: false }],
+  ])
+  h.mcpTransforms[0](editor)
+
+  assert.equal(map.size, 3)
+  assert.deepEqual(removed, [], "the transform must never remove a server")
+
+  const { editor: skills } = skillEditor([
+    { id: "opencode", name: "OpenCode", path: "/builtin/opencode.md", content: "x" },
+  ])
+  h.skillTransforms[0](skills)
+})
+
+test("context hook: persists the structure report with real usage and status", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  seedCatalog(h)
+
+  h.mcpTransforms[0](
+    mcpEditor([
+      ["basic-memory", { type: "local" }],
+      ["filterboy", { type: "local" }],
+      ["parallel", { type: "remote", url: "x" }],
+    ]).editor,
+  )
+  h.skillTransforms[0](
+    skillEditor([{ id: "opencode", name: "OpenCode", path: "/builtin/opencode.md", content: "x" }])
+      .editor,
+  )
+
+  // Usage: one tool from basic-memory.
+  await h.hooks["execute.before"](toolEvent({ tool: "basic-memory_recent_activity" }))
+
+  const event = contextEvent()
+  const snapshot = JSON.stringify(event)
+  await h.hooks.context(event)
+  assert.equal(JSON.stringify(event), snapshot, "context hook must stay read-only")
+
+  const report = h.store.get("session:ses_test:structure") as AnyRecord
+  assert.ok(report, "no structure report persisted")
+  assert.ok(report.computedAt > 0)
+
+  const names = report.servers.map((server: AnyRecord) => server.name)
+  assert.ok(!names.includes("basic-memory"), "a used server must drop out of the report")
+  assert.ok(names.includes("filterboy"), "an unusable server must be reported")
+
+  const filterboy = report.servers.find((server: AnyRecord) => server.name === "filterboy")
+  assert.equal(filterboy.unusable, true)
+  assert.equal(filterboy.status, "failed")
+  assert.equal(filterboy.used, false)
+
+  assert.deepEqual(
+    report.skills.map((skill: AnyRecord) => skill.id),
+    ["opencode"],
+  )
+})
+
+test("execute.before: records tool + skill usage in storage, not module state", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  seedCatalog(h)
+
+  await h.hooks["execute.before"](toolEvent({ tool: "skill", input: { id: "systematic-debugging" } }))
+  assert.deepEqual(h.store.get("session:ses_test:toolUsage"), ["skill"])
+  assert.deepEqual(h.store.get("session:ses_test:skillUsage"), ["systematic-debugging"])
+
+  // A repeated call does not grow the sets.
+  await h.hooks["execute.before"](toolEvent({ tool: "skill", input: { id: "systematic-debugging" } }))
+  assert.deepEqual(h.store.get("session:ses_test:skillUsage"), ["systematic-debugging"])
+})
+
+test("structure report: keys are per session and default to report-only", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.before"](toolEvent({ tool: "shell" }))
+  assert.ok(h.store.has("session:ses_test:structure"))
+  assert.ok(!h.store.has("session:ses_test:prune.diff"), "nothing may be pruned by default")
+  assert.deepEqual(h.mcpReloads, [], "no config reload may happen by default")
+})
+
+test("prune path stays inert without the owner's approval flag", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { map, removed, editor } = mcpEditor([
+    ["filterboy", { type: "local" }],
+    ["n8n", { type: "remote", url: "x" }],
+  ])
+  h.mcpTransforms[0](editor)
+
+  assert.deepEqual([...map.values()], [{ type: "local" }, { type: "remote", url: "x" }])
+  assert.deepEqual(removed, [])
+  assert.ok(!h.store.has("session:ses_test:prune.diff"))
 })
 
