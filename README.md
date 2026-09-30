@@ -52,8 +52,10 @@ Implemented (server side):
   so identifiers and words are never split. A third, **`log-compact`**, strips
   ANSI escapes and collapses runs of identical consecutive lines
   (`[ctx-guard: ×N]`), then bounds the result with head-tail — the highest ratio
-  on repetitive output. Swapping the selector — via `ctxguard_config` or
-  `/ctx-guard selector <name>` — changes the method without touching the hook.
+  on repetitive output. A fourth, **`signal-preserving`**, keeps head + tail and
+  rescues bounded middle lines matching a diagnostic pattern (errors, file:line,
+  hashes, URLs) — the fidelity pick. Swapping the selector — via `ctxguard_config`
+  or `/ctx-guard selector <name>` — changes the method without touching the hook.
 - **Duplicate suppression** — a repeated identical large result (> 1000 chars,
   same tool + arguments) collapses to a marker. The per-session signature ring
   lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16.

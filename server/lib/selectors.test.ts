@@ -7,10 +7,13 @@ import {
   MIN_CHARS,
   SELECTORS,
   SELECTOR_NAMES,
+  SIGNAL_OPTIONS,
+  SIGNAL_PATTERN,
   TAIL_CHARS,
   TOKEN_BUDGET_OPTIONS,
   collapseRuns,
   compressLog,
+  compressSignal,
   compressText,
   compressTokenBudget,
   headTail,
@@ -19,6 +22,8 @@ import {
   omissionMarker,
   resolveSelector,
   selectWith,
+  signalLines,
+  signalPreserving,
   stripAnsi,
   tokenBudget,
 } from "./selectors.ts"
@@ -179,4 +184,59 @@ test("compressLog: bounds a still-oversized result with the fallback", () => {
     fallback: { minChars: 0, headChars: 20, tailChars: 10 },
   })
   assert.match(out, /chars omitted/)
+})
+
+// --- signal-preserving selector ---------------------------------------------
+
+test("SIGNAL_PATTERN: matches diagnostics, file:line and hashes; rejects prose", () => {
+  assert.ok(SIGNAL_PATTERN.test("Fatal error: boom"))
+  assert.ok(SIGNAL_PATTERN.test("at src/foo.ts:42:7"))
+  assert.ok(SIGNAL_PATTERN.test("commit 0123456789abcdef0123456789abcdef01234567"))
+  assert.ok(SIGNAL_PATTERN.test("see https://example.com/x"))
+  assert.ok(!SIGNAL_PATTERN.test("all good here, nothing to see"))
+})
+
+test("signalLines: keeps matching lines in order, bounded by the caps", () => {
+  const middle = ["plain", "ERROR one", "plain", "ERROR two"].join("\n")
+  assert.deepEqual(signalLines(middle, SIGNAL_OPTIONS), ["ERROR one", "ERROR two"])
+
+  const many = Array.from({ length: 40 }, (_, i) => `ERROR ${i}`).join("\n")
+  assert.equal(signalLines(many, { ...SIGNAL_OPTIONS, maxSignalLines: 5 }).length, 5)
+  assert.equal(
+    signalLines(many, { ...SIGNAL_OPTIONS, maxSignalLines: 40, maxSignalChars: 20 }).length,
+    2,
+  )
+})
+
+test("signal-preserving select: below the threshold is untouched", () => {
+  const text = "x".repeat(SIGNAL_OPTIONS.minChars)
+  assert.equal(signalPreserving.select(text), text)
+})
+
+test("signal-preserving select: rescues a middle error line; head stays whole lines", () => {
+  const head = Array.from({ length: 120 }, (_, i) => `head line ${i} ${"h".repeat(24)}`).join("\n")
+  const mid = Array.from({ length: 400 }, (_, i) => `chatter ${i} ${"c".repeat(24)}`).join("\n")
+  const tail = Array.from({ length: 120 }, (_, i) => `tail line ${i} ${"t".repeat(24)}`).join("\n")
+  const text = `${head}\nERROR: the thing failed at src/foo.ts:42:7\n${mid}\n${tail}`
+
+  const out = signalPreserving.select(text)
+  assert.match(out, /ERROR: the thing failed at src\/foo\.ts:42:7/)
+  assert.match(out, /signal line\(s\) from the omitted middle/)
+
+  const headPart = out.slice(0, out.indexOf("\n… [ctx-guard:"))
+  assert.ok(text.startsWith(headPart), "head must be a verbatim prefix")
+  assert.ok(headPart.endsWith("\n"), "head must end at a line boundary")
+})
+
+test("signal-preserving select: no signal in the middle degenerates to head-tail", () => {
+  const lines = Array.from({ length: 500 }, (_, i) => `chatter ${i} ${"c".repeat(24)}`)
+  const out = signalPreserving.select(lines.join("\n"))
+  assert.match(out, /\[ctx-guard: \d+ chars omitted\]/)
+  assert.ok(!out.includes("signal line"), "no signal header when nothing matches")
+})
+
+test("signal-preserving select: a giant one-liner falls back to a bounded char cut", () => {
+  const out = signalPreserving.select("x".repeat(8000))
+  assert.match(out, /\[ctx-guard: \d+ chars omitted\]/)
+  assert.ok(out.length < 3000, `expected a bounded result, got ${out.length}`)
 })

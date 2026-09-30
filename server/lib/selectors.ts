@@ -204,6 +204,112 @@ export function compressLog(text: string, o: LogCompactOptions): string {
   return compacted === text ? text : compacted
 }
 
+// --- Signal preservation (for the signal-preserving selector) ----------------
+//
+// Keep head + tail, and rescue middle lines that look like a diagnostic:
+// errors, exceptions, file:line refs, long hashes, paths and URLs. Deterministic
+// patterns only; degenerates to head-tail when the middle carries no signal.
+
+/** Combined signal pattern (case-insensitive). Diagnostic-shaped lines only. */
+export const SIGNAL_PATTERN =
+  /\b(?:error|fatal|exception|traceback|panic|failed|failure|critical|timeout|timed out|denied|not found|exit code|non-?zero|killed|segfault|syntax error|compilation failed)\b|\b[\w./-]+\.\w{1,5}:\d+(?::\d+)?|\b[0-9a-f]{40,64}\b|\b(?:https?|file):\/\/\S+|(?:^|\s)\/(?:[\w.-]+\/)+[\w.-]+/i
+
+/** True if cutting at `i` starts a new line (the previous char is a newline). */
+export function isLineCut(text: string, i: number): boolean {
+  return i > 0 && i <= text.length && text[i - 1] === "\n"
+}
+
+/** Nearest line boundary at or after `target`; falls back to `target`. */
+export function snapLineForward(text: string, target: number, limit: number): number {
+  const ceiling = Math.min(text.length, target + limit)
+  for (let i = target; i <= ceiling; i += 1) {
+    if (isLineCut(text, i)) return i
+  }
+  return splitsSurrogate(text, target) ? target - 1 : target
+}
+
+/** Nearest line boundary at or before `target`; falls back to `target`. */
+export function snapLineBackward(text: string, target: number, limit: number): number {
+  const floor = Math.max(1, target - limit)
+  for (let i = target; i >= floor; i -= 1) {
+    if (isLineCut(text, i)) return i
+  }
+  return splitsSurrogate(text, target) ? target - 1 : target
+}
+
+export type SignalOptions = {
+  /** Results at or below this many chars are left untouched. */
+  minChars: number
+  /** Char budget kept from the start (snapped to a line boundary). */
+  headChars: number
+  /** Char budget kept from the end (snapped to a line boundary). */
+  tailChars: number
+  /** Max number of rescued middle lines. */
+  maxSignalLines: number
+  /** Max total chars in the rescued block. */
+  maxSignalChars: number
+  /** Max chars kept per rescued line (longer lines are "…"-truncated). */
+  maxSignalLineChars: number
+  /** Max chars to scan for a line boundary before falling back. */
+  snapLimit: number
+}
+
+export const SIGNAL_OPTIONS: SignalOptions = {
+  minChars: MIN_CHARS,
+  headChars: HEAD_CHARS,
+  tailChars: TAIL_CHARS,
+  maxSignalLines: 25,
+  maxSignalChars: 2000,
+  maxSignalLineChars: 400,
+  snapLimit: 128,
+}
+
+/**
+ * Rescue up to `maxSignalLines` / `maxSignalChars` of the middle's signal lines,
+ * in order, each "…"-truncated to `maxSignalLineChars`.
+ */
+export function signalLines(middle: string, o: SignalOptions): string[] {
+  const kept: string[] = []
+  let chars = 0
+  for (const line of middle.split("\n")) {
+    if (kept.length >= o.maxSignalLines) break
+    if (!SIGNAL_PATTERN.test(line)) continue
+    const text =
+      line.length > o.maxSignalLineChars
+        ? `${line.slice(0, o.maxSignalLineChars - 1)}…`
+        : line
+    if (chars + text.length > o.maxSignalChars) break
+    kept.push(text)
+    chars += text.length
+  }
+  return kept
+}
+
+/**
+ * Keep head + tail, rescuing bounded middle lines that match `SIGNAL_PATTERN`.
+ * Degenerates to head-tail when the middle has no signal. Faithful: retained
+ * text is verbatim; only `[ctx-guard: …]` markers are added.
+ */
+export function compressSignal(text: string, o: SignalOptions): string {
+  if (text.length <= o.minChars) return text
+  const headEnd = snapLineBackward(text, o.headChars, o.snapLimit)
+  const tailStart = snapLineForward(text, text.length - o.tailChars, o.snapLimit)
+  if (tailStart <= headEnd) return text
+
+  const head = text.slice(0, headEnd)
+  const middle = text.slice(headEnd, tailStart)
+  const tail = text.slice(tailStart)
+  const kept = signalLines(middle, o)
+
+  if (kept.length === 0) return `${head}\n${omissionMarker(middle.length)}\n${tail}`
+
+  const keptText = kept.join("\n")
+  const omitted = middle.length - keptText.length
+  const signalHeader = `… [ctx-guard: ${kept.length} signal line(s) from the omitted middle] …`
+  const tailMarker = omitted > 0 ? `${omissionMarker(omitted)}\n` : ""
+  return `${head}\n${signalHeader}\n${keptText}\n${tailMarker}${tail}`
+}
+
 // --- Selector registry ------------------------------------------------------
 
 /**
@@ -211,7 +317,7 @@ export function compressLog(text: string, o: LogCompactOptions): string {
  * lands; `SelectorName` is derived from it so the config surface and the
  * registry can never drift.
  */
-export const SELECTOR_NAMES = ["head-tail", "token-budget", "log-compact"] as const
+export const SELECTOR_NAMES = ["head-tail", "token-budget", "log-compact", "signal-preserving"] as const
 
 export type SelectorName = (typeof SELECTOR_NAMES)[number]
 
@@ -247,10 +353,20 @@ export const logCompact: CompressionSelector = {
   select: (text) => compressLog(text, LOG_COMPACT_OPTIONS),
 }
 
+/**
+ * Fidelity selector: head + tail plus bounded signal lines rescued from the
+ * omitted middle. Degenerates to head-tail when the middle carries no signal.
+ */
+export const signalPreserving: CompressionSelector = {
+  id: "signal-preserving",
+  select: (text) => compressSignal(text, SIGNAL_OPTIONS),
+}
+
 export const SELECTORS: Record<SelectorName, CompressionSelector> = {
   "head-tail": headTail,
   "token-budget": tokenBudget,
   "log-compact": logCompact,
+  "signal-preserving": signalPreserving,
 }
 
 export function isSelectorName(value: unknown): value is SelectorName {
