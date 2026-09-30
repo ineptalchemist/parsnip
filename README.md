@@ -47,8 +47,11 @@ Implemented (server side):
   committed. The compaction is chosen by a pluggable **selector**
   (`server/lib/selectors.ts`); the default `head-tail` keeps
   `head + "… [ctx-guard: N chars omitted] …" + tail`. Defaults: 4000-char
-  threshold, 1600 head, 1200 tail. Swapping the selector changes the method
-  without touching the hook.
+  threshold, 1600 head, 1200 tail. A second selector, **`token-budget`**, keeps
+  the same budget but cuts on token boundaries (after whitespace or a delimiter)
+  so identifiers and words are never split. Swapping the selector — via
+  `ctxguard_config` or `/ctx-guard selector <name>` — changes the method without
+  touching the hook.
 - **Duplicate suppression** — a repeated identical large result (> 1000 chars,
   same tool + arguments) collapses to a marker. The per-session signature ring
   lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16.

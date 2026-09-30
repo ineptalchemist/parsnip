@@ -60,6 +60,81 @@ export function compressText(text: string, o: CompressOptions): string {
   return `${text.slice(0, o.headChars)}\n${omissionMarker(omitted)}\n${text.slice(text.length - o.tailChars)}`
 }
 
+// --- Token-boundary helpers (for the token-budget selector) ------------------
+//
+// A cut is "safe" when it falls between tokens: after whitespace or a common
+// delimiter. `CHARS_PER_TOKEN` mirrors the uncalibrated `estimateTokens`
+// heuristic in `quality.ts` (chars / 4); it is only used to express the budget
+// in tokens, and is kept local so this module stays a leaf.
+
+const CHARS_PER_TOKEN = 4
+
+/** Characters a safe cut may follow: whitespace or a common delimiter. */
+const BOUNDARY = /[\s,{}\[\]:;"']/
+
+/** True if cutting at index `i` would split a UTF-16 surrogate pair. */
+function splitsSurrogate(text: string, i: number): boolean {
+  if (i <= 0 || i >= text.length) return false
+  const prev = text.charCodeAt(i - 1)
+  const next = text.charCodeAt(i)
+  return prev >= 0xd800 && prev <= 0xdbff && next >= 0xdc00 && next <= 0xdfff
+}
+
+/** True if `i` is a safe cut: not the start, right after a boundary char. */
+function isBoundaryCut(text: string, i: number): boolean {
+  return i > 0 && i <= text.length && BOUNDARY.test(text[i - 1])
+}
+
+/** Nearest safe cut at or before `target`; falls back to `target`. */
+function snapHead(text: string, target: number, limit: number): number {
+  const floor = Math.max(1, target - limit)
+  for (let i = target; i >= floor; i -= 1) {
+    if (isBoundaryCut(text, i)) return i
+  }
+  return splitsSurrogate(text, target) ? target - 1 : target
+}
+
+/** Nearest safe cut at or after `target`; falls back to `target`. */
+function snapTail(text: string, target: number, limit: number): number {
+  const ceiling = Math.min(text.length, target + limit)
+  for (let i = target; i <= ceiling; i += 1) {
+    if (isBoundaryCut(text, i)) return i
+  }
+  return splitsSurrogate(text, target) ? target - 1 : target
+}
+
+export type TokenBudgetOptions = {
+  /** Results at or below this many tokens are left untouched. */
+  minTokens: number
+  /** Token budget kept from the start of an oversized result. */
+  headTokens: number
+  /** Token budget kept from the end of an oversized result. */
+  tailTokens: number
+  /** Max chars to scan for a boundary before falling back to the raw cut. */
+  snapLimit: number
+}
+
+/** Same effective budget as `head-tail` (tokens × CHARS_PER_TOKEN). */
+export const TOKEN_BUDGET_OPTIONS: TokenBudgetOptions = {
+  minTokens: 1000, // ≈4000 chars
+  headTokens: 400, // ≈1600 chars
+  tailTokens: 300, // ≈1200 chars
+  snapLimit: 128,
+}
+
+/**
+ * Head + tail sized by a token budget, cut on token boundaries. Faithful: the
+ * output is a verbatim prefix + marker + verbatim suffix. Anything that would
+ * not shrink is returned verbatim.
+ */
+export function compressTokenBudget(text: string, o: TokenBudgetOptions): string {
+  if (text.length <= o.minTokens * CHARS_PER_TOKEN) return text
+  const head = snapHead(text, o.headTokens * CHARS_PER_TOKEN, o.snapLimit)
+  const tail = snapTail(text, text.length - o.tailTokens * CHARS_PER_TOKEN, o.snapLimit)
+  if (tail <= head) return text
+  return `${text.slice(0, head)}\n${omissionMarker(tail - head)}\n${text.slice(tail)}`
+}
+
 // --- Selector registry ------------------------------------------------------
 
 /**
@@ -67,7 +142,7 @@ export function compressText(text: string, o: CompressOptions): string {
  * lands; `SelectorName` is derived from it so the config surface and the
  * registry can never drift.
  */
-export const SELECTOR_NAMES = ["head-tail"] as const
+export const SELECTOR_NAMES = ["head-tail", "token-budget"] as const
 
 export type SelectorName = (typeof SELECTOR_NAMES)[number]
 
@@ -83,8 +158,19 @@ export const headTail: CompressionSelector = {
   select: (text) => compressText(text, COMPRESSION_OPTIONS),
 }
 
+/**
+ * Token-boundary-aware head + tail. Keeps the same budget as `head-tail` but
+ * cuts between tokens (after whitespace or a delimiter) instead of at a raw
+ * char index, so identifiers, numbers and words are never split.
+ */
+export const tokenBudget: CompressionSelector = {
+  id: "token-budget",
+  select: (text) => compressTokenBudget(text, TOKEN_BUDGET_OPTIONS),
+}
+
 export const SELECTORS: Record<SelectorName, CompressionSelector> = {
   "head-tail": headTail,
+  "token-budget": tokenBudget,
 }
 
 export function isSelectorName(value: unknown): value is SelectorName {

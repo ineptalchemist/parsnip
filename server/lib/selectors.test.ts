@@ -7,12 +7,15 @@ import {
   SELECTORS,
   SELECTOR_NAMES,
   TAIL_CHARS,
+  TOKEN_BUDGET_OPTIONS,
   compressText,
+  compressTokenBudget,
   headTail,
   isSelectorName,
   omissionMarker,
   resolveSelector,
   selectWith,
+  tokenBudget,
 } from "./selectors.ts"
 
 // --- registry ---------------------------------------------------------------
@@ -74,4 +77,47 @@ test("selectWith: applies the named selector; unknown names fall back to head-ta
   assert.match(selectWith("head-tail", text), /chars omitted/)
   assert.equal(selectWith("does-not-exist", text), selectWith("head-tail", text))
   assert.equal(selectWith("head-tail", "tiny"), "tiny")
+})
+
+// --- token-budget selector --------------------------------------------------
+
+test("token-budget select: below the threshold is untouched", () => {
+  const text = "a".repeat(TOKEN_BUDGET_OPTIONS.minTokens * 4)
+  assert.equal(tokenBudget.select(text), text)
+})
+
+test("token-budget select: cuts on word boundaries, keeping whole words", () => {
+  const text = "word ".repeat(3000)
+  const out = tokenBudget.select(text)
+
+  const head = out.slice(0, out.indexOf("\n… [ctx-guard:"))
+  assert.ok(head.length > 0 && text.startsWith(head), "head must be a prefix")
+  assert.equal(head.at(-1), " ", "head must end right after a boundary")
+  assert.equal(head.length % 5, 0, "head must end on a word boundary")
+
+  const tail = out.slice(out.lastIndexOf("\n") + 1)
+  assert.ok(text.endsWith(tail), "tail must be a suffix")
+  assert.equal((text.length - tail.length) % 5, 0, "tail must start on a word boundary")
+})
+
+test("token-budget select: no boundary in range falls back to the raw char cut", () => {
+  const text = "x".repeat(8000) // one giant token: no boundary anywhere
+  assert.equal(tokenBudget.select(text), compressText(text, COMPRESSION_OPTIONS))
+})
+
+test("token-budget select: never splits a surrogate pair on the fallback cut", () => {
+  const text = `${"x".repeat(1599)}${"\u{1F600}".repeat(2000)}`
+  const out = tokenBudget.select(text)
+  const head = out.slice(0, out.indexOf("\n… [ctx-guard:"))
+  const last = head.charCodeAt(head.length - 1)
+  assert.ok(!(last >= 0xd800 && last <= 0xdbff), "head must not end on a lone high surrogate")
+  assert.equal(head.length, 1599)
+})
+
+test("compressTokenBudget: overlapping windows return the text unchanged", () => {
+  const text = "word word word word"
+  assert.equal(
+    compressTokenBudget(text, { minTokens: 0, headTokens: 4, tailTokens: 4, snapLimit: 0 }),
+    text,
+  )
 })
