@@ -30,17 +30,15 @@ export type ToolResultLike = {
   readonly metadata?: unknown
 }
 
-// --- Defaults (flip off with the *_ENABLED flags) ---------------------------
+// --- Defaults ---------------------------------------------------------------
 //
-// COMPRESSION_ENABLED is currently OFF (2026-09-30) while the tool-output
-// quality harness is built (see README "Measuring effects"); DEDUP stays ON.
-// Flip back to `true` to re-enable head+tail truncation.
-export const COMPRESSION_ENABLED = false
+// Whether compression/dedup actually run is runtime-configurable via
+// `server/lib/config.ts` (a persisted switch, default compression OFF / dedup
+// ON). These are the shape/bound defaults only.
 export const MIN_CHARS = 4000
 export const HEAD_CHARS = 1600
 export const TAIL_CHARS = 1200
 
-export const DEDUP_ENABLED = true
 export const DEDUP_MIN_CHARS = 1000
 export const DEDUP_MEMORY = 16
 

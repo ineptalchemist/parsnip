@@ -9,13 +9,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import ctxGuard, { guarded } from "./index.ts"
-import {
-  COMPRESSION_ENABLED,
-  COMPRESSION_OPTIONS,
-  DEDUP_MARKER,
-  compressResult,
-  textLengthOf,
-} from "./lib/toolhooks.ts"
+import { COMPRESSION_OPTIONS, DEDUP_MARKER, compressResult, textLengthOf } from "./lib/toolhooks.ts"
 
 type AnyRecord = Record<string, any>
 
@@ -24,6 +18,8 @@ function makeHarness() {
   const transforms: Array<(editor: AnyRecord) => void> = []
   const mcpTransforms: Array<(editor: AnyRecord) => void> = []
   const skillTransforms: Array<(editor: AnyRecord) => void> = []
+  const toolTransforms: Array<(editor: AnyRecord) => void> = []
+  const commandTransforms: Array<(editor: AnyRecord) => void> = []
   const mcpReloads: string[] = []
   const store = new Map<string, unknown>()
   const disposed: string[] = []
@@ -61,11 +57,24 @@ function makeHarness() {
       },
     },
     tool: {
+      transform: async (callback: (editor: AnyRecord) => void) => {
+        toolTransforms.push(callback)
+        return { dispose: async () => void disposed.push("tool.transform") }
+      },
       hook: async (name: string, callback: (input: AnyRecord) => unknown) => {
         hooks[name] = callback
         return { dispose: async () => void disposed.push(`tool.hook:${name}`) }
       },
       list: async () => [],
+      reload: async () => {},
+    },
+    command: {
+      transform: async (callback: (editor: AnyRecord) => void) => {
+        commandTransforms.push(callback)
+        return { dispose: async () => void disposed.push("command.transform") }
+      },
+      list: async () => ({ location: null, data: [] }),
+      reload: async () => {},
     },
     storage: {
       get: async (key: string) => store.get(key),
@@ -81,11 +90,29 @@ function makeHarness() {
     transforms,
     mcpTransforms,
     skillTransforms,
+    toolTransforms,
+    commandTransforms,
     mcpReloads,
     mcpServers,
     skillCatalog,
     store,
     disposed,
+  }
+}
+
+/** Captures the tools a `ctx.tool.transform` callback `add`s. */
+function collectorEditor() {
+  const added: AnyRecord[] = []
+  return {
+    added,
+    editor: {
+      list: () => added,
+      get: (name: string) => added.find((entry) => entry.name === name),
+      namespace: () => {},
+      add: (entry: AnyRecord) => void added.push(entry),
+      update: () => {},
+      remove: () => {},
+    },
   }
 }
 
@@ -158,6 +185,8 @@ test("setup registers compaction + context hooks and a model transform", async (
   assert.equal(h.transforms.length, 1)
   assert.equal(h.mcpTransforms.length, 1)
   assert.equal(h.skillTransforms.length, 1)
+  assert.equal(h.toolTransforms.length, 1)
+  assert.equal(h.commandTransforms.length, 1)
 })
 
 test("setup returns a cleanup that disposes every registration", async () => {
@@ -166,6 +195,7 @@ test("setup returns a cleanup that disposes every registration", async () => {
   assert.equal(typeof cleanup, "function")
   await cleanup!()
   assert.deepEqual(h.disposed.sort(), [
+    "command.transform",
     "mcp.transform",
     "model.transform",
     "session.hook:compaction",
@@ -173,6 +203,7 @@ test("setup returns a cleanup that disposes every registration", async () => {
     "skill.transform",
     "tool.hook:execute.after",
     "tool.hook:execute.before",
+    "tool.transform",
   ])
 })
 
@@ -267,7 +298,7 @@ function toolEvent(overrides: AnyRecord = {}) {
   }
 }
 
-test("execute.after: honors COMPRESSION_ENABLED on a large shell result", async () => {
+test("execute.after: passes a large shell result through when compression is off (default)", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
@@ -279,17 +310,27 @@ test("execute.after: honors COMPRESSION_ENABLED on a large shell result", async 
   await h.hooks["execute.after"](event)
 
   const text = (event.result.content as Array<AnyRecord>)[0].text
-  if (COMPRESSION_ENABLED) {
-    assert.match(text, /\[ctx-guard: \d+ chars omitted\]/)
-    assert.ok(text.length < 3000, `expected a bounded placeholder, got ${text.length} chars`)
-    assert.equal(text.slice(0, 1600), "x".repeat(1600))
-    assert.ok(text.endsWith("x".repeat(1200)))
-  } else {
-    assert.equal(text, "x".repeat(6000), "compression disabled: result must pass through")
-  }
+  assert.equal(text, "x".repeat(6000), "compression off: result must pass through")
   assert.equal(JSON.stringify(event.input), inputSnapshot, "execute.after mutated event.input")
   assert.equal(event.result.output, outputRef, "structured output must be untouched")
   assert.equal(event.result.metadata, metadataRef, "metadata must be untouched")
+})
+
+test("execute.after: compresses a large shell result when enabled via config", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+
+  const event = toolEvent()
+  const outputRef = event.result.output
+  await h.hooks["execute.after"](event)
+
+  const text = (event.result.content as Array<AnyRecord>)[0].text
+  assert.match(text, /\[ctx-guard: \d+ chars omitted\]/)
+  assert.ok(text.length < 3000, `expected a bounded placeholder, got ${text.length} chars`)
+  assert.equal(text.slice(0, 1600), "x".repeat(1600))
+  assert.ok(text.endsWith("x".repeat(1200)))
+  assert.equal(event.result.output, outputRef, "structured output must be untouched")
 })
 
 test("execute.after: leaves small output untouched", async () => {
@@ -322,14 +363,11 @@ test("execute.after: suppresses a repeated identical large result", async () => 
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
-  // When compression is on, a first-seen large result is bounded; when off, it
-  // passes through. Either way a repeat is suppressed.
-  const firstBound = COMPRESSION_ENABLED ? /chars omitted/ : null
+  // Compression is off by default, so the first-seen large result passes
+  // through unchanged; a repeat is still suppressed by dedup.
   const first = toolEvent()
   await h.hooks["execute.after"](first)
-  const firstText = (first.result.content as Array<AnyRecord>)[0].text
-  if (firstBound) assert.match(firstText, firstBound)
-  else assert.equal(firstText, "x".repeat(6000))
+  assert.equal((first.result.content as Array<AnyRecord>)[0].text, "x".repeat(6000))
 
   const second = toolEvent()
   await h.hooks["execute.after"](second)
@@ -338,9 +376,7 @@ test("execute.after: suppresses a repeated identical large result", async () => 
   // A different command is not suppressed.
   const third = toolEvent({ input: { command: "printf other" } })
   await h.hooks["execute.after"](third)
-  const thirdText = (third.result.content as Array<AnyRecord>)[0].text
-  if (firstBound) assert.match(thirdText, firstBound)
-  else assert.equal(thirdText, "x".repeat(6000))
+  assert.equal((third.result.content as Array<AnyRecord>)[0].text, "x".repeat(6000))
 })
 
 test("execute.after: keeps its dedup memory in storage, not module state", async () => {
@@ -353,41 +389,43 @@ test("execute.after: keeps its dedup memory in storage, not module state", async
   assert.ok(history[0].startsWith("shell:"))
 })
 
-test("execute.after: records dedup savings (and compression when enabled) in storage", async () => {
+test("execute.after: dedup savings are recorded; compression is off by default", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
-  const first = toolEvent()
-  await h.hooks["execute.after"](first)
-
-  // The second identical call is a duplicate, not a fresh compression.
-  const second = toolEvent()
-  await h.hooks["execute.after"](second)
-
-  const originalText = "x".repeat(6000)
+  await h.hooks["execute.after"](toolEvent())
+  await h.hooks["execute.after"](toolEvent()) // duplicate
 
   const savings = h.store.get("session:ses_test:savings") as AnyRecord
   assert.ok(savings, "no savings ledger persisted")
-
-  if (COMPRESSION_ENABLED) {
-    const expectedOmitted =
-      originalText.length -
-      textLengthOf(compressResult({ content: [{ type: "text", text: originalText }] }, COMPRESSION_OPTIONS))
-    assert.equal(savings.compressions, 1)
-    assert.equal(savings.charsOmitted, expectedOmitted)
-    assert.ok(savings.charsOmitted > 3000, "compression should drop the bulk of the middle")
-  } else {
-    assert.equal(savings.compressions, 0)
-    assert.equal(savings.charsOmitted, 0)
-  }
-
+  assert.equal(savings.compressions, 0)
+  assert.equal(savings.charsOmitted, 0)
   assert.equal(savings.dedups, 1)
-  assert.equal(savings.charsDeduped, originalText.length - DEDUP_MARKER.length)
+  assert.equal(savings.charsDeduped, 6000 - DEDUP_MARKER.length)
+})
+
+test("execute.after: compression savings are recorded when enabled", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+
+  await h.hooks["execute.after"](toolEvent())
+
+  const originalText = "x".repeat(6000)
+  const expectedOmitted =
+    originalText.length -
+    textLengthOf(compressResult({ content: [{ type: "text", text: originalText }] }, COMPRESSION_OPTIONS))
+
+  const savings = h.store.get("session:ses_test:savings") as AnyRecord
+  assert.equal(savings.compressions, 1)
+  assert.equal(savings.charsOmitted, expectedOmitted)
+  assert.ok(savings.charsOmitted > 3000, "compression should drop the bulk of the middle")
 })
 
 test("execute.after: logs a parseable savings line per event", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("ctx-guard:config", { compression: true })
 
   const lines: string[] = []
   const original = console.error
@@ -400,9 +438,7 @@ test("execute.after: logs a parseable savings line per event", async () => {
   }
 
   const joined = lines.join("\n")
-  if (COMPRESSION_ENABLED) {
-    assert.match(joined, /\[ctx-guard\] savings session=ses_test event=compress chars=\d+/)
-  }
+  assert.match(joined, /\[ctx-guard\] savings session=ses_test event=compress chars=\d+/)
   assert.match(joined, /\[ctx-guard\] savings session=ses_test event=dedup chars=\d+/)
 })
 
@@ -639,5 +675,83 @@ test("prune path stays inert without the owner's approval flag", async () => {
   assert.deepEqual([...map.values()], [{ type: "local" }, { type: "remote", url: "x" }])
   assert.deepEqual(removed, [])
   assert.ok(!h.store.has("session:ses_test:prune.diff"))
+})
+
+// --- Runtime config surfaces (tool + command) -------------------------------
+
+function commandCollector() {
+  const added: AnyRecord[] = []
+  return { added, editor: { add: (definition: AnyRecord) => void added.push(definition) } }
+}
+
+test("setup registers a config tool and a config command", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+  assert.equal(added.length, 1)
+  assert.equal(added[0].name, "ctxguard_config")
+  assert.equal(typeof added[0].execute, "function")
+
+  const commands = commandCollector()
+  h.commandTransforms[0](commands.editor)
+  assert.equal(commands.added.length, 1)
+  assert.equal(commands.added[0].name, "ctx-guard")
+  assert.equal(typeof commands.added[0].execute, "function")
+})
+
+test("config tool: toggles global compression and execute.after honors it", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+  const tool = added[0]
+
+  const out = await tool.execute({ compression: true }, { sessionID: "ses_test" })
+  assert.match(out.content[0].text, /effective: compression on, dedup on/)
+  assert.deepEqual(h.store.get("ctx-guard:config"), { compression: true })
+
+  const event = toolEvent()
+  await h.hooks["execute.after"](event)
+  assert.match((event.result.content as Array<AnyRecord>)[0].text, /chars omitted/)
+})
+
+test("config tool: a session override beats the global override", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+  const tool = added[0]
+
+  await tool.execute({ compression: true }, { sessionID: "ses_test" }) // global on
+  const scoped = await tool.execute({ compression: false, session: true }, { sessionID: "ses_test" })
+  assert.match(scoped.content[0].text, /effective: compression off, dedup on/)
+  assert.deepEqual(h.store.get("session:ses_test:ctx-guard"), { compression: false })
+
+  // A different session still sees the global override (compression on).
+  const other = toolEvent({ sessionID: "ses_other" })
+  await h.hooks["execute.after"](other)
+  assert.match((other.result.content as Array<AnyRecord>)[0].text, /chars omitted/)
+})
+
+test("config command: parses `compression off` and scopes with `session`", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const commands = commandCollector()
+  h.commandTransforms[0](commands.editor)
+  const command = commands.added[0]
+
+  await command.execute({ sessionID: "ses_test", prompt: "compression off" })
+  assert.deepEqual(h.store.get("ctx-guard:config"), { compression: false })
+
+  await command.execute({ sessionID: "ses_test", prompt: "dedup off session" })
+  assert.deepEqual(h.store.get("session:ses_test:ctx-guard"), { dedup: false })
+
+  await command.execute({ sessionID: "ses_test", prompt: "reset" })
+  assert.equal(h.store.has("ctx-guard:config"), false)
 })
 

@@ -26,10 +26,22 @@ import type { MCPEditor } from "@opencode/plugin/promise/mcp"
 import type { ModelEditor } from "@opencode/plugin/promise/model"
 import type { SkillEditor } from "@opencode/plugin/promise/skill"
 import type { SessionCompaction, SessionContext } from "@opencode/plugin/promise/session"
+import type { ToolEditor } from "@opencode/plugin/promise/tool"
+import type { CommandEditor } from "@opencode/plugin/promise/command"
 import type { Model } from "@opencode/schema/model"
 import { buildContinuityBlock } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
 import { loadContinuity, loadSavings, saveContinuity, saveSavings, type ContinuityState } from "./lib/storage.ts"
+import {
+  applyConfigPatch,
+  describeConfig,
+  effectiveConfig,
+  loadGlobalConfig,
+  loadSessionConfig,
+  resolveConfig,
+  type ConfigOverride,
+  type ConfigScope,
+} from "./lib/config.ts"
 import {
   PRUNE_OPTIONS,
   STRUCTURE_PRUNE_ENABLED,
@@ -47,9 +59,7 @@ import {
   type ToolUsage,
 } from "./lib/structure.ts"
 import {
-  COMPRESSION_ENABLED,
   COMPRESSION_OPTIONS,
-  DEDUP_ENABLED,
   DEDUP_MARKER,
   DEDUP_MIN_CHARS,
   addCompression,
@@ -279,6 +289,120 @@ async function register(
   }
 }
 
+// --- Runtime config surfaces (tool + command) --------------------------------
+
+const CONFIG_TOOL_NAME = "ctxguard_config"
+
+/** Best-effort text from a command prompt (SDK prompt shape not pinned down). */
+function promptText(prompt: unknown): string {
+  if (typeof prompt === "string") return prompt
+  if (Array.isArray(prompt)) return prompt.map(promptText).join(" ")
+  if (prompt && typeof prompt === "object") {
+    const p = prompt as Record<string, unknown>
+    if (typeof p.text === "string") return p.text
+    if (Array.isArray(p.parts)) return promptText(p.parts)
+    if (typeof p.content === "string") return p.content
+  }
+  return ""
+}
+
+/**
+ * Agent-facing toggle, added to the tool catalog via `ctx.tool.transform`. The
+ * model calls it to view or change compression/dedup (e.g. turn compression off
+ * while doing critical work). Returns the resulting config as visible content.
+ */
+function configTool(ctx: Plugin.Context) {
+  return {
+    name: CONFIG_TOOL_NAME,
+    description:
+      "View or change ctx-guard's lossy tool-output transforms. compression = " +
+      "head+tail truncation of oversized shell output; dedup = collapse a " +
+      "repeated identical large result to a marker. Set session:true to scope a " +
+      "change to the current session only (e.g. while doing critical work); " +
+      "otherwise it is global. Values persist across restarts.",
+    input: {
+      type: "object",
+      properties: {
+        compression: { type: "boolean", description: "Enable/disable head+tail compression." },
+        dedup: { type: "boolean", description: "Enable/disable duplicate suppression." },
+        session: { type: "boolean", description: "Scope the change to this session (default: global)." },
+        reset: { type: "boolean", description: "Clear the override at the chosen scope (revert to defaults)." },
+      },
+      additionalProperties: false,
+    },
+    execute: async (rawInput: unknown, toolContext: { sessionID: string }) => {
+      const input = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>
+      const scope: ConfigScope = input.session === true ? "session" : "global"
+      const reset = input.reset === true
+
+      const patch: ConfigOverride = {}
+      if (typeof input.compression === "boolean") patch.compression = input.compression
+      if (typeof input.dedup === "boolean") patch.dedup = input.dedup
+
+      // A bare view writes nothing.
+      const changed = reset || patch.compression !== undefined || patch.dedup !== undefined
+      if (changed) await applyConfigPatch(ctx.storage, toolContext.sessionID, patch, { scope, reset })
+
+      const [globalOverride, sessionOverride] = await Promise.all([
+        loadGlobalConfig(ctx.storage),
+        loadSessionConfig(ctx.storage, toolContext.sessionID),
+      ])
+      const effective = resolveConfig(globalOverride, sessionOverride)
+      const headline = changed
+        ? `ctx-guard config updated (scope: ${scope}${reset ? ", reset" : ""})`
+        : "ctx-guard config"
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `${headline}.\n` +
+              `effective: ${describeConfig(effective)}\n` +
+              `global override: ${JSON.stringify(globalOverride)}\n` +
+              `session override: ${JSON.stringify(sessionOverride)}`,
+          },
+        ],
+      }
+    },
+  }
+}
+
+/**
+ * Human-facing toggle: `/ctx-guard compression off`, `/ctx-guard dedup on
+ * session`, `/ctx-guard reset`. A V2 command cannot return output, so this
+ * applies the change silently — confirm by calling the `ctxguard_config` tool.
+ */
+function configCommand(ctx: Plugin.Context) {
+  return {
+    name: "ctx-guard",
+    description:
+      "View or change ctx-guard compression/dedup: `/ctx-guard compression off`, " +
+      "`/ctx-guard dedup on`, `/ctx-guard reset [session]`. Add `session` to scope " +
+      "to this session only.",
+    execute: async (invocation: { sessionID: string; prompt: unknown }) => {
+      const tokens = promptText(invocation.prompt).trim().toLowerCase().split(/\s+/).filter(Boolean)
+      if (tokens.length === 0) return
+
+      const scope: ConfigScope = tokens.includes("session") ? "session" : "global"
+      const words = tokens.filter((token) => token !== "session")
+
+      if (words[0] === "reset") {
+        await applyConfigPatch(ctx.storage, invocation.sessionID, {}, { scope, reset: true })
+        return
+      }
+
+      const [field, value] = words
+      const enabled = value === "on"
+      if (value !== "on" && value !== "off") return // silent on unknown syntax
+      const patch: ConfigOverride = {}
+      if (field === "compression") patch.compression = enabled
+      else if (field === "dedup") patch.dedup = enabled
+      else return
+      await applyConfigPatch(ctx.storage, invocation.sessionID, patch, { scope })
+    },
+  }
+}
+
 const ctxGuard: Plugin.Plugin = {
   id: "ctx-guard",
 
@@ -343,6 +467,26 @@ const ctxGuard: Plugin.Plugin = {
             name: info.name,
             autoinvoke: info.autoinvoke === true,
           }))
+        }),
+      ),
+    )
+
+    // --- Runtime config surfaces: agent tool + human command -----------------
+    // Both write the persisted config (server/lib/config.ts) that execute.after
+    // reads, so a toggle takes effect on the next tool call and survives
+    // reloads/restarts.
+    await register(registrations, "tool.transform", () =>
+      ctx.tool.transform(
+        guarded("tool.transform", (editor: ToolEditor) => {
+          editor.add(configTool(ctx))
+        }),
+      ),
+    )
+
+    await register(registrations, "command.transform", () =>
+      ctx.command.transform(
+        guarded("command.transform", (editor: CommandEditor) => {
+          editor.add(configCommand(ctx))
         }),
       ),
     )
@@ -468,9 +612,13 @@ const ctxGuard: Plugin.Plugin = {
           const text = textLengthOf(event.result)
           if (text <= 0) return // structured output only → nothing to compress
 
+          // Effective on/off comes from ctx.storage (session override -> global
+          // override -> default), read fresh so a toggle takes effect next call.
+          const config = await effectiveConfig(ctx.storage, event.sessionID)
+
           // Dedup first: a repeated large result collapses to a marker, and is
           // not re-added to the history (it is already there).
-          if (DEDUP_ENABLED && text > DEDUP_MIN_CHARS) {
+          if (config.dedup && text > DEDUP_MIN_CHARS) {
             const signature = signatureOf(event.tool, event.input)
             const recent = await loadRecentSignatures(ctx.storage, event.sessionID)
             if (recent.includes(signature)) {
@@ -492,7 +640,7 @@ const ctxGuard: Plugin.Plugin = {
 
           // Then compress: head + tail with an omission marker. Only the result
           // that is about to be committed is rewritten — never the transcript.
-          if (COMPRESSION_ENABLED) {
+          if (config.compression) {
             const compressed = compressResult(event.result, COMPRESSION_OPTIONS)
             if (compressed !== event.result) {
               // Mutate first (the primary job), then measure best-effort: a
