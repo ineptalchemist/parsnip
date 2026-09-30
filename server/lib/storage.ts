@@ -9,6 +9,7 @@
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { SavingsLedger } from "./toolhooks.ts"
+import { asBySelector } from "./toolhooks.ts"
 
 export type ContinuityState = {
   lastTask: string
@@ -65,7 +66,13 @@ export const savingsKey = (sessionID: string): string => `session:${sessionID}:s
 
 /** Narrow an arbitrary stored JSON value to a SavingsLedger. */
 export function asSavings(value: unknown): SavingsLedger {
-  const base: SavingsLedger = { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 }
+  const base: SavingsLedger = {
+    compressions: 0,
+    charsOmitted: 0,
+    dedups: 0,
+    charsDeduped: 0,
+    bySelector: {},
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) return base
   const v = value as Record<string, unknown>
   const num = (key: string): number =>
@@ -75,6 +82,7 @@ export function asSavings(value: unknown): SavingsLedger {
     charsOmitted: num("charsOmitted"),
     dedups: num("dedups"),
     charsDeduped: num("charsDeduped"),
+    bySelector: asBySelector(v.bySelector),
   }
 }
 

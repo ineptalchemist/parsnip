@@ -439,7 +439,10 @@ test("execute.after: logs a parseable savings line per event", async () => {
   }
 
   const joined = lines.join("\n")
-  assert.match(joined, /\[ctx-guard\] savings session=ses_test event=compress chars=\d+/)
+  assert.match(
+    joined,
+    /\[ctx-guard\] savings session=ses_test selector=head-tail event=compress chars=\d+/,
+  )
   assert.match(joined, /\[ctx-guard\] savings session=ses_test event=dedup chars=\d+/)
 })
 
@@ -786,5 +789,39 @@ test("config command: parses `selector head-tail`; unknown selector writes nothi
 
   await command.execute({ sessionID: "ses_test", prompt: "selector nope" })
   assert.deepEqual(h.store.get("ctx-guard:config"), { selector: "head-tail" })
+})
+
+// --- Fidelity ledger --------------------------------------------------------
+
+test("execute.after: records a per-method fidelity event with the dropped-region hash", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+
+  await h.hooks["execute.after"](toolEvent())
+
+  const events = h.store.get("session:ses_test:compressions") as AnyRecord[]
+  assert.equal(events.length, 1)
+  const event = events[0]
+  assert.equal(event.selector, "head-tail")
+  assert.equal(event.tool, "shell")
+  assert.equal(event.inputChars, 6000)
+  assert.equal(event.omittedChars, event.inputChars - event.outputChars)
+  assert.match(event.inputHash, /^[0-9a-f]{8}$/)
+  assert.match(event.omittedHash, /^[0-9a-f]{8}$/)
+  assert.equal(event.omittedSample.length, 120)
+
+  // The savings ledger breaks the same event down by selector.
+  const savings = h.store.get("session:ses_test:savings") as AnyRecord
+  assert.equal(savings.bySelector["head-tail"].compressions, 1)
+  assert.equal(savings.bySelector["head-tail"].charsOmitted, savings.charsOmitted)
+})
+
+test("execute.after: no fidelity event when compression is off", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.after"](toolEvent())
+  assert.equal(h.store.has("session:ses_test:compressions"), false)
 })
 

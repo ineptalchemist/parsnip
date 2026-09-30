@@ -25,11 +25,18 @@ import { DatabaseSync } from "node:sqlite"
 const defaultDb = path.join(os.homedir(), ".local", "share", "opencode", "opencode.db")
 const dbPath = process.argv[2] ?? defaultDb
 
+type SelectorTally = {
+  compressions: number
+  charsOmitted: number
+  charsKept?: number
+}
+
 type CharLedger = {
   compressions: number
   charsOmitted: number
   dedups: number
   charsDeduped: number
+  bySelector?: Record<string, SelectorTally>
 }
 
 type TokenUsage = {
@@ -119,6 +126,9 @@ for (const id of sessions) {
       `  chars:   compress x${ledger.compressions} (-${ledger.charsOmitted})` +
         `  dedup x${ledger.dedups} (-${ledger.charsDeduped})  = -${removed} chars removed`,
     )
+    for (const [name, tally] of Object.entries(ledger.bySelector ?? {})) {
+      console.log(`    ${name}: x${tally.compressions} (-${tally.charsOmitted} chars)`)
+    }
   }
   console.log("")
 }

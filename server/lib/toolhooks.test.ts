@@ -5,15 +5,24 @@ import {
   DEDUP_MARKER,
   addCompression,
   addDedup,
+  asBySelector,
+  asCompressionEvents,
   asSignatures,
   commandOf,
   compressResult,
   compressText,
+  compressionsKey,
+  compressionEvent,
   emptySavings,
+  fnv1a,
   isTargetTool,
+  loadRecentCompressions,
   loadRecentSignatures,
   omissionMarker,
+  omittedRegion,
   replaceResultText,
+  resultTextOf,
+  saveRecentCompressions,
   saveRecentSignatures,
   shouldCompress,
   signatureOf,
@@ -221,28 +230,57 @@ test("recent signatures: round-trip through storage, capped at the memory size",
 
 // --- savings ledger ---------------------------------------------------------
 
-test("emptySavings: all fields zero", () => {
+test("emptySavings: all fields zero, empty selector breakdown", () => {
   assert.deepEqual(emptySavings(), {
     compressions: 0,
     charsOmitted: 0,
     dedups: 0,
     charsDeduped: 0,
+    bySelector: {},
   })
 })
 
-test("addCompression: accumulates the exact omitted delta", () => {
+test("addCompression: accumulates the exact omitted delta, globally and per selector", () => {
   let ledger = emptySavings()
-  ledger = addCompression(ledger, 6000, 2800)
-  assert.deepEqual(ledger, { compressions: 1, charsOmitted: 3200, dedups: 0, charsDeduped: 0 })
+  ledger = addCompression(ledger, "head-tail", 6000, 2800)
+  assert.equal(ledger.compressions, 1)
+  assert.equal(ledger.charsOmitted, 3200)
+  assert.deepEqual(ledger.bySelector["head-tail"], {
+    compressions: 1,
+    charsOmitted: 3200,
+    charsKept: 2800,
+  })
 
-  ledger = addCompression(ledger, 5000, 3000)
-  assert.deepEqual(ledger, { compressions: 2, charsOmitted: 5200, dedups: 0, charsDeduped: 0 })
+  ledger = addCompression(ledger, "head-tail", 5000, 3000)
+  assert.equal(ledger.compressions, 2)
+  assert.equal(ledger.charsOmitted, 5200)
+  assert.deepEqual(ledger.bySelector["head-tail"], {
+    compressions: 2,
+    charsOmitted: 5200,
+    charsKept: 5800,
+  })
+})
+
+test("addCompression: a second selector gets its own tally", () => {
+  let ledger = addCompression(emptySavings(), "head-tail", 6000, 2800)
+  ledger = addCompression(ledger, "log-compact", 10_000, 1000)
+  assert.equal(ledger.compressions, 2)
+  assert.deepEqual(ledger.bySelector["head-tail"], {
+    compressions: 1,
+    charsOmitted: 3200,
+    charsKept: 2800,
+  })
+  assert.deepEqual(ledger.bySelector["log-compact"], {
+    compressions: 1,
+    charsOmitted: 9000,
+    charsKept: 1000,
+  })
 })
 
 test("addCompression: a zero/negative delta changes nothing", () => {
   const ledger = emptySavings()
-  assert.equal(addCompression(ledger, 100, 100), ledger)
-  assert.equal(addCompression(ledger, 100, 200), ledger)
+  assert.equal(addCompression(ledger, "head-tail", 100, 100), ledger)
+  assert.equal(addCompression(ledger, "head-tail", 100, 200), ledger)
 })
 
 test("addDedup: accumulates chars replaced by the marker", () => {
@@ -261,4 +299,107 @@ test("addDedup: nothing saved when the result is no larger than the marker", () 
   const ledger = emptySavings()
   assert.equal(addDedup(ledger, DEDUP_MARKER.length), ledger)
   assert.equal(addDedup(ledger, 0), ledger)
+})
+
+// --- fidelity ledger --------------------------------------------------------
+
+test("asBySelector: narrows malformed entries, coerces to finite numbers", () => {
+  assert.deepEqual(asBySelector(undefined), {})
+  assert.deepEqual(asBySelector([1, 2]), {})
+  assert.deepEqual(
+    asBySelector({ "head-tail": { compressions: 2, charsOmitted: 100, charsKept: 40 } }),
+    { "head-tail": { compressions: 2, charsOmitted: 100, charsKept: 40 } },
+  )
+  // A junk tally is dropped; missing fields become 0.
+  assert.deepEqual(asBySelector({ a: "nope", b: { compressions: 1 } }), {
+    b: { compressions: 1, charsOmitted: 0, charsKept: 0 },
+  })
+})
+
+test("fnv1a: deterministic, 8 hex chars, sensitive to content", () => {
+  assert.match(fnv1a("hello"), /^[0-9a-f]{8}$/)
+  assert.equal(fnv1a("hello"), fnv1a("hello"))
+  assert.notEqual(fnv1a("hello"), fnv1a("hello!"))
+  assert.equal(fnv1a(""), "811c9dc5")
+})
+
+test("resultTextOf: concatenates text parts; length matches textLengthOf", () => {
+  const result = {
+    content: [
+      { type: "text", text: "abc" },
+      { type: "file", uri: "file:///x" },
+      { type: "text", text: "de" },
+    ],
+  }
+  assert.equal(resultTextOf(result), "abcde")
+  assert.equal(resultTextOf(result).length, textLengthOf(result))
+  assert.equal(resultTextOf({ content: "xy" }), "xy")
+  assert.equal(resultTextOf({ output: { exit: 0 } }), "")
+  assert.equal(resultTextOf(undefined), "")
+})
+
+test("omittedRegion: recovers the exact dropped middle of a head-tail compression", () => {
+  const O = { minChars: 100, headChars: 20, tailChars: 10 }
+  const middle = "m".repeat(150)
+  const text = `${"H".repeat(20)}${middle}${"T".repeat(10)}`
+  assert.equal(omittedRegion(text, compressText(text, O)), middle)
+})
+
+test("compressionEvent: records chars, FNV-1a hashes, and a sample of the drop", () => {
+  const input = `${"H".repeat(20)}${"m".repeat(150)}${"T".repeat(10)}`
+  const output = compressText(input, { minChars: 100, headChars: 20, tailChars: 10 })
+  const event = compressionEvent({ selector: "head-tail", tool: "shell", input, output, now: 7 })
+
+  assert.equal(event.selector, "head-tail")
+  assert.equal(event.tool, "shell")
+  assert.equal(event.at, 7)
+  assert.equal(event.inputChars, input.length)
+  assert.equal(event.outputChars, output.length)
+  assert.equal(event.omittedChars, input.length - output.length)
+  assert.equal(event.inputHash, fnv1a(input))
+  assert.equal(event.outputHash, fnv1a(output))
+  assert.equal(event.omittedHash, fnv1a("m".repeat(150)))
+  assert.equal(event.omittedSample, "m".repeat(120))
+})
+
+test("asCompressionEvents: keeps plausible events, bounded", () => {
+  assert.deepEqual(asCompressionEvents(undefined), [])
+  assert.deepEqual(asCompressionEvents("nope"), [])
+  const events = asCompressionEvents([{ selector: "x", at: 1 }, "junk", { foo: 1 }])
+  assert.equal(events.length, 1)
+  assert.equal(events[0].selector, "x")
+})
+
+test("compression events: round-trip through storage, capped at the memory size", async () => {
+  const store = new Map<string, unknown>()
+  const storage = {
+    get: async (key: string) => store.get(key),
+    set: async (key: string, value: unknown) => void store.set(key, value),
+  } as unknown as StorageDomain
+
+  assert.equal(compressionsKey("ses_1"), "session:ses_1:compressions")
+  assert.deepEqual(await loadRecentCompressions(storage, "ses_1"), [])
+
+  const make = (n: number) =>
+    compressionEvent({
+      selector: "head-tail",
+      tool: "shell",
+      input: "x".repeat(10 + n),
+      output: "x",
+      now: n,
+    })
+
+  await saveRecentCompressions(storage, "ses_1", [make(1), make(2)])
+  assert.deepEqual(
+    (await loadRecentCompressions(storage, "ses_1")).map((e) => e.at),
+    [1, 2],
+  )
+
+  await saveRecentCompressions(storage, "ses_1", Array.from({ length: 70 }, (_, i) => make(i)))
+  const kept = await loadRecentCompressions(storage, "ses_1")
+  assert.equal(kept.length, 64)
+  assert.equal(kept[kept.length - 1].at, 69)
+
+  // A different session has its own ring.
+  assert.deepEqual(await loadRecentCompressions(storage, "ses_2"), [])
 })

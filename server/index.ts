@@ -73,9 +73,13 @@ import {
   addDedup,
   commandOf,
   compressResult,
+  compressionEvent,
   isTargetTool,
+  loadRecentCompressions,
   loadRecentSignatures,
   replaceResultText,
+  resultTextOf,
+  saveRecentCompressions,
   saveRecentSignatures,
   signatureOf,
   textLengthOf,
@@ -664,15 +668,17 @@ const ctxGuard: Plugin.Plugin = {
             await saveRecentSignatures(ctx.storage, event.sessionID, [...recent, signature])
           }
 
-          // Then compress: head + tail with an omission marker. Only the result
-          // that is about to be committed is rewritten — never the transcript.
+          // Then compress with the configured selector. Only the result that is
+          // about to be committed is rewritten — never the transcript.
           if (config.compression) {
-            const compressed = compressResult(event.result, (text) =>
-              selectWith(config.selector, text),
-            )
+            const selector = config.selector
+            const compressed = compressResult(event.result, (part) => selectWith(selector, part))
             if (compressed !== event.result) {
-              // Mutate first (the primary job), then measure best-effort: a
+              // Capture the pre-compression text for the fidelity diff, then
+              // mutate first (the primary job) and measure best-effort: a
               // storage failure must never undo an already-applied compression.
+              const beforeText = resultTextOf(event.result)
+              const afterText = resultTextOf(compressed)
               event.result = compressed
               const compressedLen = textLengthOf(compressed)
               const omitted = text - compressedLen
@@ -680,10 +686,22 @@ const ctxGuard: Plugin.Plugin = {
                 await saveSavings(
                   ctx.storage,
                   event.sessionID,
-                  addCompression(await loadSavings(ctx.storage, event.sessionID), text, compressedLen),
+                  addCompression(
+                    await loadSavings(ctx.storage, event.sessionID),
+                    selector,
+                    text,
+                    compressedLen,
+                  ),
                 )
+                // Fidelity signal: fingerprint what this method dropped, so an
+                // external eval can attribute context loss to a selector.
+                const recent = await loadRecentCompressions(ctx.storage, event.sessionID)
+                await saveRecentCompressions(ctx.storage, event.sessionID, [
+                  ...recent,
+                  compressionEvent({ selector, tool: event.tool, input: beforeText, output: afterText }),
+                ])
                 console.error(
-                  `[ctx-guard] savings session=${event.sessionID} event=compress chars=${omitted}`,
+                  `[ctx-guard] savings session=${event.sessionID} selector=${selector} event=compress chars=${omitted}`,
                 )
               }
             }

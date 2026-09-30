@@ -62,6 +62,16 @@ export const MAX_COMMAND_CHARS = 200
 // hook rewrites a result *about to be committed*, so the pre-rewrite text length
 // is exactly what would otherwise have entered the transcript.
 
+/** Per-method breakdown: what one compression selector removed, and kept. */
+export type SelectorTally = {
+  /** Number of results compressed by this selector. */
+  compressions: number
+  /** Total chars this selector dropped. */
+  charsOmitted: number
+  /** Total chars that survived (output length, markers included). */
+  charsKept: number
+}
+
 /** Per-session tally of what compression + dedup removed (in chars). */
 export type SavingsLedger = {
   /** Number of results compressed (head + tail + omission marker). */
@@ -72,6 +82,8 @@ export type SavingsLedger = {
   dedups: number
   /** Total chars replaced by the dedup marker across the session. */
   charsDeduped: number
+  /** The same compression events, broken down by selector id (fidelity signal). */
+  bySelector: Record<string, SelectorTally>
 }
 
 export const emptySavings = (): SavingsLedger => ({
@@ -79,25 +91,58 @@ export const emptySavings = (): SavingsLedger => ({
   charsOmitted: 0,
   dedups: 0,
   charsDeduped: 0,
+  bySelector: {},
 })
 
 /**
- * Fold a compression event into the ledger. The omitted chars are the
- * difference between the pre- and post-compression text lengths (the omission
- * marker is already part of the compressed result, so the delta is exact).
+ * Fold a compression event into the ledger, globally and per selector. The
+ * omitted chars are the difference between the pre- and post-compression text
+ * lengths (the omission marker is already part of the compressed result, so the
+ * delta is exact).
  */
 export function addCompression(
   ledger: SavingsLedger,
+  selector: string,
   originalLen: number,
   compressedLen: number,
 ): SavingsLedger {
   const omitted = Math.max(0, originalLen - compressedLen)
   if (omitted === 0) return ledger
+  const prev = ledger.bySelector[selector] ?? { compressions: 0, charsOmitted: 0, charsKept: 0 }
   return {
     ...ledger,
     compressions: ledger.compressions + 1,
     charsOmitted: ledger.charsOmitted + omitted,
+    bySelector: {
+      ...ledger.bySelector,
+      [selector]: {
+        compressions: prev.compressions + 1,
+        charsOmitted: prev.charsOmitted + omitted,
+        charsKept: prev.charsKept + Math.max(0, compressedLen),
+      },
+    },
   }
+}
+
+/** Coerce to a finite number, else 0 (storage may hold anything). */
+function finiteOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0
+}
+
+/** Narrow stored JSON to a selector breakdown, dropping malformed entries. */
+export function asBySelector(value: unknown): Record<string, SelectorTally> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  const out: Record<string, SelectorTally> = {}
+  for (const [selector, tally] of Object.entries(value as Record<string, unknown>)) {
+    if (!tally || typeof tally !== "object" || Array.isArray(tally)) continue
+    const t = tally as Record<string, unknown>
+    out[selector] = {
+      compressions: finiteOrZero(t.compressions),
+      charsOmitted: finiteOrZero(t.charsOmitted),
+      charsKept: finiteOrZero(t.charsKept),
+    }
+  }
+  return out
 }
 
 /** Fold a dedup event: the replaced text minus the marker length is the saving. */
@@ -141,6 +186,25 @@ export function textLengthOf(result: unknown): number {
     if (text !== undefined) total += text.length
   }
   return total
+}
+
+/**
+ * Concatenate a result's text parts (no separator), so
+ * `resultTextOf(r).length === textLengthOf(r)`. Used by the fidelity ledger to
+ * diff the pre- and post-compression text.
+ */
+export function resultTextOf(result: unknown): string {
+  if (result == null || typeof result !== "object") return ""
+  const content = (result as ToolResultLike).content
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+
+  let text = ""
+  for (const part of content) {
+    const piece = textOfPart(part)
+    if (piece !== undefined) text += piece
+  }
+  return text
 }
 
 /**
@@ -282,6 +346,126 @@ export async function saveRecentSignatures(
   const bounded = signatures.slice(-max)
   await storage.set(
     toolHistoryKey(sessionID),
+    bounded as unknown as Parameters<StorageDomain["set"]>[1],
+  )
+}
+
+// --- Fidelity ledger (per-session compression events) -----------------------
+//
+// One bounded fingerprint per compression, so an external eval can attribute
+// context loss to a specific selector: `omittedHash` identifies exactly what a
+// method dropped. Records only — the plugin does not judge quality itself.
+
+/** Cap on retained events per session (a ring; newest kept). */
+export const COMPRESSION_EVENT_MEMORY = 64
+
+/** Chars of the dropped region kept verbatim for inspection. */
+export const OMITTED_SAMPLE_CHARS = 120
+
+/** 32-bit FNV-1a, 8-char hex. A correlation fingerprint, not a security hash. */
+export function fnv1a(text: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
+}
+
+/**
+ * The bytes between the longest common prefix and suffix of `input`/`output`.
+ * Exact for prefix+suffix selectors (`head-tail`); best-effort for selectors
+ * that reorder (they may over-report the dropped region).
+ */
+export function omittedRegion(input: string, output: string): string {
+  const minLen = Math.min(input.length, output.length)
+  let prefix = 0
+  while (prefix < minLen && input[prefix] === output[prefix]) prefix += 1
+  let suffix = 0
+  while (
+    suffix < minLen - prefix &&
+    input[input.length - 1 - suffix] === output[output.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+  return input.slice(prefix, input.length - suffix)
+}
+
+/** One compression event: what a selector dropped, and the identity of both ends. */
+export type CompressionEvent = {
+  selector: string
+  tool: string
+  at: number
+  inputChars: number
+  outputChars: number
+  /** Net chars removed: `inputChars - outputChars`. */
+  omittedChars: number
+  /** FNV-1a of the pre-compression text. */
+  inputHash: string
+  /** FNV-1a of the post-compression text. */
+  outputHash: string
+  /** FNV-1a of the dropped region (best-effort; exact for head-tail). */
+  omittedHash: string
+  /** First `OMITTED_SAMPLE_CHARS` of the dropped region, for inspection. */
+  omittedSample: string
+}
+
+/** Pure: build the fidelity event for one compression. */
+export function compressionEvent(args: {
+  selector: string
+  tool: string
+  input: string
+  output: string
+  now?: number
+}): CompressionEvent {
+  const { selector, tool, input, output } = args
+  const region = omittedRegion(input, output)
+  return {
+    selector,
+    tool,
+    at: args.now ?? Date.now(),
+    inputChars: input.length,
+    outputChars: output.length,
+    omittedChars: Math.max(0, input.length - output.length),
+    inputHash: fnv1a(input),
+    outputHash: fnv1a(output),
+    omittedHash: fnv1a(region),
+    omittedSample: region.slice(0, OMITTED_SAMPLE_CHARS),
+  }
+}
+
+export const compressionsKey = (sessionID: string): string => `session:${sessionID}:compressions`
+
+/** Narrow stored JSON to a bounded list of plausible events. */
+export function asCompressionEvents(
+  value: unknown,
+  max = COMPRESSION_EVENT_MEMORY,
+): CompressionEvent[] {
+  if (!Array.isArray(value)) return []
+  const events = value.filter((entry): entry is CompressionEvent => {
+    if (!entry || typeof entry !== "object") return false
+    const e = entry as Record<string, unknown>
+    return typeof e.selector === "string" && typeof e.at === "number"
+  })
+  return events.slice(-max)
+}
+
+export async function loadRecentCompressions(
+  storage: StorageDomain,
+  sessionID: string,
+): Promise<CompressionEvent[]> {
+  return asCompressionEvents(await storage.get(compressionsKey(sessionID)))
+}
+
+/** Append an event, keeping only the most recent `COMPRESSION_EVENT_MEMORY`. */
+export async function saveRecentCompressions(
+  storage: StorageDomain,
+  sessionID: string,
+  events: readonly CompressionEvent[],
+): Promise<void> {
+  const bounded = events.slice(-COMPRESSION_EVENT_MEMORY)
+  await storage.set(
+    compressionsKey(sessionID),
     bounded as unknown as Parameters<StorageDomain["set"]>[1],
   )
 }

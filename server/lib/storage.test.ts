@@ -51,14 +51,23 @@ test("savingsKey: namespaces by session", () => {
 })
 
 test("asSavings: rejects non-objects and fills safe defaults", () => {
-  assert.deepEqual(asSavings(undefined), { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 })
-  assert.deepEqual(asSavings(null), { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 })
-  assert.deepEqual(asSavings([1, 2]), { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 })
-  assert.deepEqual(asSavings({ compressions: 3, bogus: 9 }), {
-    compressions: 3,
-    charsOmitted: 0,
-    dedups: 0,
-    charsDeduped: 0,
+  const empty = { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0, bySelector: {} }
+  assert.deepEqual(asSavings(undefined), empty)
+  assert.deepEqual(asSavings(null), empty)
+  assert.deepEqual(asSavings([1, 2]), empty)
+  assert.deepEqual(asSavings({ compressions: 3, bogus: 9 }), { ...empty, compressions: 3 })
+})
+
+test("asSavings: narrows the bySelector breakdown", () => {
+  const ledger = asSavings({
+    compressions: 1,
+    bySelector: {
+      "head-tail": { compressions: 1, charsOmitted: 3200, charsKept: 2800 },
+      junk: "nope",
+    },
+  })
+  assert.deepEqual(ledger.bySelector, {
+    "head-tail": { compressions: 1, charsOmitted: 3200, charsKept: 2800 },
   })
 })
 
@@ -74,14 +83,22 @@ test("loadSavings / saveSavings: round-trip through storage", async () => {
     charsOmitted: 0,
     dedups: 0,
     charsDeduped: 0,
+    bySelector: {},
   })
 
-  await saveSavings(storage, "ses_1", { compressions: 2, charsOmitted: 6400, dedups: 1, charsDeduped: 5900 })
+  await saveSavings(storage, "ses_1", {
+    compressions: 2,
+    charsOmitted: 6400,
+    dedups: 1,
+    charsDeduped: 5900,
+    bySelector: { "head-tail": { compressions: 2, charsOmitted: 6400, charsKept: 5600 } },
+  })
   assert.deepEqual(await loadSavings(storage, "ses_1"), {
     compressions: 2,
     charsOmitted: 6400,
     dedups: 1,
     charsDeduped: 5900,
+    bySelector: { "head-tail": { compressions: 2, charsOmitted: 6400, charsKept: 5600 } },
   })
 
   // A different session has its own tally.
@@ -90,6 +107,7 @@ test("loadSavings / saveSavings: round-trip through storage", async () => {
     charsOmitted: 0,
     dedups: 0,
     charsDeduped: 0,
+    bySelector: {},
   })
 })
 

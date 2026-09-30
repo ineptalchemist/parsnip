@@ -55,6 +55,12 @@ Implemented (server side):
 - **Savings ledger** — every compression/dedup event folds its exact char delta
   into a per-session tally in `ctx.storage` under `session:<id>:savings`. This is
   the measurement surface (see "Measuring effects").
+- **Fidelity ledger** — `session:<id>:savings.bySelector` breaks the compression
+  tally down per selector, and a bounded `session:<id>:compressions` ring records
+  one fingerprint per compression: the selector, exact char deltas, FNV-1a hashes
+  of the input / output / dropped region, and a 120-char sample of what was
+  dropped. This is how context loss can be attributed to a specific method (see
+  "Measuring effects").
 - **Real token usage** — the plugin subscribes to `session.usage.updated` and
   writes the session's cumulative usage to `session:<id>:usage` (`input`,
   `output`, `reasoning`, `cache.read`, `cache.write`, `cost`). This is the
@@ -151,8 +157,17 @@ Two ledgers are recorded per session, and they measure different things.
    (`compressions`/`charsOmitted`, `dedups`/`charsDeduped`). For a compression
    the delta is `original - compressed`; for a dedup it is
    `original - marker.length`. These are **characters, not tokens** — they are
-   never converted.
-3. **Mechanism ceiling (offline, deterministic):** `npm run bench` pushes a
+   never converted. `bySelector` breaks the compression side down per method
+   (`compressions`/`charsOmitted`/`charsKept`), so methods compare directly.
+3. **What each method dropped (live, per event):** a bounded
+   `session:<id>:compressions` ring (cap 64) holds one record per compression —
+   `selector`, `tool`, char deltas, FNV-1a `inputHash`/`outputHash`/`omittedHash`,
+   and a 120-char `omittedSample`. `omittedHash` is the replay key: an external
+   eval can ask "did dropping exactly this region break a known-answer query?"
+   and attribute a failure to a selector. The dropped region is reconstructed
+   from the longest common prefix/suffix of input and output — exact for
+   `head-tail`, best-effort for reordering selectors.
+4. **Mechanism ceiling (offline, deterministic):** `npm run bench` pushes a
    realistic shell-output corpus through the pure `compressText` / dedup
    functions — a ~95% ceiling on the sample corpus.
 
