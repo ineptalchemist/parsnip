@@ -67,7 +67,6 @@ import {
   type ToolUsage,
 } from "./lib/structure.ts"
 import {
-  COMPRESSION_OPTIONS,
   DEDUP_MARKER,
   DEDUP_MIN_CHARS,
   addCompression,
@@ -81,6 +80,7 @@ import {
   signatureOf,
   textLengthOf,
 } from "./lib/toolhooks.ts"
+import { SELECTOR_NAMES, isSelectorName, selectWith } from "./lib/selectors.ts"
 
 /** Used only if the model's real context limit cannot be resolved. */
 const DEFAULT_CONTEXT_LIMIT = 200_000
@@ -324,14 +324,20 @@ function configTool(ctx: Plugin.Context) {
     name: CONFIG_TOOL_NAME,
     description:
       "View or change ctx-guard's lossy tool-output transforms. compression = " +
-      "head+tail truncation of oversized shell output; dedup = collapse a " +
-      "repeated identical large result to a marker. Set session:true to scope a " +
-      "change to the current session only (e.g. while doing critical work); " +
-      "otherwise it is global. Values persist across restarts.",
+      "head+tail truncation of oversized shell output; selector = which " +
+      "compression backend to use; dedup = collapse a repeated identical large " +
+      "result to a marker. Set session:true to scope a change to the current " +
+      "session only (e.g. while doing critical work); otherwise it is global. " +
+      "Values persist across restarts.",
     input: {
       type: "object",
       properties: {
         compression: { type: "boolean", description: "Enable/disable head+tail compression." },
+        selector: {
+          type: "string",
+          enum: [...SELECTOR_NAMES],
+          description: "Compression method used when compression is on (default head-tail).",
+        },
         dedup: { type: "boolean", description: "Enable/disable duplicate suppression." },
         session: { type: "boolean", description: "Scope the change to this session (default: global)." },
         reset: { type: "boolean", description: "Clear the override at the chosen scope (revert to defaults)." },
@@ -345,10 +351,15 @@ function configTool(ctx: Plugin.Context) {
 
       const patch: ConfigOverride = {}
       if (typeof input.compression === "boolean") patch.compression = input.compression
+      if (isSelectorName(input.selector)) patch.selector = input.selector
       if (typeof input.dedup === "boolean") patch.dedup = input.dedup
 
       // A bare view writes nothing.
-      const changed = reset || patch.compression !== undefined || patch.dedup !== undefined
+      const changed =
+        reset ||
+        patch.compression !== undefined ||
+        patch.selector !== undefined ||
+        patch.dedup !== undefined
       if (changed) await applyConfigPatch(ctx.storage, toolContext.sessionID, patch, { scope, reset })
 
       const [globalOverride, sessionOverride] = await Promise.all([
@@ -384,9 +395,9 @@ function configCommand(ctx: Plugin.Context) {
   return {
     name: "ctx-guard",
     description:
-      "View or change ctx-guard compression/dedup: `/ctx-guard compression off`, " +
-      "`/ctx-guard dedup on`, `/ctx-guard reset [session]`. Add `session` to scope " +
-      "to this session only.",
+      "View or change ctx-guard compression/dedup/selector: `/ctx-guard compression off`, " +
+      "`/ctx-guard dedup on`, `/ctx-guard selector head-tail`, " +
+      "`/ctx-guard reset [session]`. Add `session` to scope to this session only.",
     execute: async (invocation: { sessionID: string; prompt: unknown }) => {
       const tokens = promptText(invocation.prompt).trim().toLowerCase().split(/\s+/).filter(Boolean)
       if (tokens.length === 0) return
@@ -396,6 +407,13 @@ function configCommand(ctx: Plugin.Context) {
 
       if (words[0] === "reset") {
         await applyConfigPatch(ctx.storage, invocation.sessionID, {}, { scope, reset: true })
+        return
+      }
+
+      if (words[0] === "selector") {
+        const name = words[1]
+        if (!isSelectorName(name)) return // silent on an unknown selector
+        await applyConfigPatch(ctx.storage, invocation.sessionID, { selector: name }, { scope })
         return
       }
 
@@ -649,7 +667,9 @@ const ctxGuard: Plugin.Plugin = {
           // Then compress: head + tail with an omission marker. Only the result
           // that is about to be committed is rewritten — never the transcript.
           if (config.compression) {
-            const compressed = compressResult(event.result, COMPRESSION_OPTIONS)
+            const compressed = compressResult(event.result, (text) =>
+              selectWith(config.selector, text),
+            )
             if (compressed !== event.result) {
               // Mutate first (the primary job), then measure best-effort: a
               // storage failure must never undo an already-applied compression.

@@ -7,6 +7,10 @@
  * transcript, so the provider's cached prefix stays intact. (The other
  * content-writing surface is `session.hook("compaction")`.)
  *
+ * Compression is applied through a pluggable *selector* (see `./selectors.ts`);
+ * this module owns the result-level handling (string vs. text parts, file /
+ * output / metadata passthrough) and dedup.
+ *
  * Everything here is pure and unit-testable under `node --test`. The storage
  * helpers at the bottom take the storage domain as a parameter, and the type
  * import is erased by Node's type stripper, so this module adds no runtime
@@ -14,14 +18,18 @@
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 
-export type CompressOptions = {
-  /** Results shorter than this are left completely untouched. */
-  minChars: number
-  /** Characters kept from the start of an oversized result. */
-  headChars: number
-  /** Characters kept from the end of an oversized result. */
-  tailChars: number
-}
+// Compression primitives + the selector registry live in `./selectors.ts` (a
+// leaf module). Re-exported here so existing imports keep resolving.
+export {
+  COMPRESSION_OPTIONS,
+  HEAD_CHARS,
+  MIN_CHARS,
+  TAIL_CHARS,
+  compressText,
+  omissionMarker,
+  shouldCompress,
+} from "./selectors.ts"
+export type { CompressOptions, CompressionSelector, SelectorName } from "./selectors.ts"
 
 /** Loosely-typed view of `Tool.Result` (which has readonly fields). */
 export type ToolResultLike = {
@@ -34,32 +42,18 @@ export type ToolResultLike = {
 //
 // Whether compression/dedup actually run is runtime-configurable via
 // `server/lib/config.ts` (a persisted switch, default compression OFF / dedup
-// ON). These are the shape/bound defaults only.
-export const MIN_CHARS = 4000
-export const HEAD_CHARS = 1600
-export const TAIL_CHARS = 1200
-
+// ON). The compression *shape/bound* defaults live in `./selectors.ts`.
 export const DEDUP_MIN_CHARS = 1000
 export const DEDUP_MEMORY = 16
 
 /** Confirmed live on 2.0.19 in step 2.1: the shell tool is `shell`. */
 export const TARGET_TOOLS: readonly string[] = ["bash", "shell"]
 
-export const COMPRESSION_OPTIONS: CompressOptions = {
-  minChars: MIN_CHARS,
-  headChars: HEAD_CHARS,
-  tailChars: TAIL_CHARS,
-}
-
 export const DEDUP_MARKER =
   "[ctx-guard: duplicate output suppressed — same command ran recently]"
 
 /** Longest command snippet kept as continuity state. */
 export const MAX_COMMAND_CHARS = 200
-
-export function omissionMarker(omittedChars: number): string {
-  return `… [ctx-guard: ${omittedChars} chars omitted] …`
-}
 
 // --- Savings ledger ---------------------------------------------------------
 //
@@ -134,22 +128,6 @@ export function isTargetTool(
 
 // --- Compression ------------------------------------------------------------
 
-export function shouldCompress(text: string, o: CompressOptions): boolean {
-  return text.length > o.minChars
-}
-
-/**
- * Keep the head and the tail of an oversized string, replacing the middle with
- * an omission marker. Anything that would not actually shrink is returned
- * verbatim.
- */
-export function compressText(text: string, o: CompressOptions): string {
-  if (!shouldCompress(text, o)) return text
-  const omitted = text.length - o.headChars - o.tailChars
-  if (omitted <= 0 || o.headChars < 0 || o.tailChars < 0) return text
-  return `${text.slice(0, o.headChars)}\n${omissionMarker(omitted)}\n${text.slice(text.length - o.tailChars)}`
-}
-
 /** Total length of the text content of a result (string or text parts only). */
 export function textLengthOf(result: unknown): number {
   if (result == null || typeof result !== "object") return 0
@@ -166,23 +144,23 @@ export function textLengthOf(result: unknown): number {
 }
 
 /**
- * Compress the text content of a tool result. Returns the input unchanged when
- * there is nothing to compress (structured `output`-only results, small
- * results). Never touches `output` or `metadata`; `{ type: "file" }` parts pass
- * through untouched.
+ * Compress the text content of a tool result with a selector. Returns the input
+ * unchanged when the selector leaves every text part untouched (structured
+ * `output`-only results, small results). Never touches `output` or `metadata`;
+ * `{ type: "file" }` parts pass through untouched.
  *
  * Immutable: a changed result is a copy, so the caller's object is never
  * mutated (the hook assigns the returned value).
  */
 export function compressResult<T extends ToolResultLike>(
   result: T,
-  o: CompressOptions = COMPRESSION_OPTIONS,
+  select: (text: string) => string,
 ): T {
   if (result == null || typeof result !== "object") return result
   const content = result.content
 
   if (typeof content === "string") {
-    const compressed = compressText(content, o)
+    const compressed = select(content)
     return compressed === content ? result : ({ ...result, content: compressed } as T)
   }
 
@@ -192,7 +170,7 @@ export function compressResult<T extends ToolResultLike>(
   const parts = content.map((part) => {
     const text = textOfPart(part)
     if (text === undefined) return part
-    const compressed = compressText(text, o)
+    const compressed = select(text)
     if (compressed === text) return part
     changed = true
     return { ...(part as Record<string, unknown>), text: compressed }

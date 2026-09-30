@@ -7,28 +7,38 @@
  * replaces. Values are read at `execute.after` time, so a change takes effect on
  * the next tool call without depending on hot reload propagating a constant.
  *
+ * `selector` picks *which* compression backend runs when `compression` is on
+ * (see `./selectors.ts`). `isSelectorName` is the single source of truth for the
+ * valid names, so an unknown stored value is dropped rather than trusted.
+ *
  * The SDK reference is a type-only import, erased by Node's type stripper, so
  * this module adds no runtime dependency.
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
+import type { SelectorName } from "./selectors.ts"
+import { isSelectorName } from "./selectors.ts"
 
 export type CtxGuardConfig = {
-  /** Head+tail truncation of oversized shell/bash results. */
+  /** Whether compression runs at all. */
   compression: boolean
   /** Collapse a repeated identical large result to a marker. */
   dedup: boolean
+  /** Which compression selector runs when `compression` is on. */
+  selector: SelectorName
 }
 
 /** A partial override; an absent field falls through to the next level. */
 export type ConfigOverride = {
   compression?: boolean
   dedup?: boolean
+  selector?: SelectorName
 }
 
 /** Used when neither the session nor the global override sets a field. */
 export const DEFAULT_CONFIG: CtxGuardConfig = {
   compression: false, // head+tail compression is off by default (2026-09-30)
   dedup: true,
+  selector: "head-tail",
 }
 
 export const GLOBAL_CONFIG_KEY = "ctx-guard:config"
@@ -46,6 +56,7 @@ export function asConfigOverride(value: unknown): ConfigOverride {
   const out: ConfigOverride = {}
   if (typeof v.compression === "boolean") out.compression = v.compression
   if (typeof v.dedup === "boolean") out.dedup = v.dedup
+  if (isSelectorName(v.selector)) out.selector = v.selector
   return out
 }
 
@@ -62,12 +73,13 @@ export function resolveConfig(
   return {
     compression: sessionOverride.compression ?? globalOverride.compression ?? defaults.compression,
     dedup: sessionOverride.dedup ?? globalOverride.dedup ?? defaults.dedup,
+    selector: sessionOverride.selector ?? globalOverride.selector ?? defaults.selector,
   }
 }
 
 /** Human/agent-readable one-line summary of a config. */
 export function describeConfig(config: CtxGuardConfig): string {
-  return `compression ${config.compression ? "on" : "off"}, dedup ${config.dedup ? "on" : "off"}`
+  return `compression ${config.compression ? "on" : "off"}, dedup ${config.dedup ? "on" : "off"}, selector ${config.selector}`
 }
 
 // --- Storage (ctx.storage; the SDK type is type-only) -----------------------

@@ -28,8 +28,8 @@ function makeStorage() {
   return { store, storage }
 }
 
-test("DEFAULT_CONFIG: compression off, dedup on", () => {
-  assert.deepEqual(DEFAULT_CONFIG, { compression: false, dedup: true })
+test("DEFAULT_CONFIG: compression off, dedup on, selector head-tail", () => {
+  assert.deepEqual(DEFAULT_CONFIG, { compression: false, dedup: true, selector: "head-tail" })
 })
 
 test("sessionConfigKey: namespaces by session", () => {
@@ -38,11 +38,15 @@ test("sessionConfigKey: namespaces by session", () => {
 })
 
 test("resolveConfig: session override beats global beats default", () => {
-  assert.deepEqual(resolveConfig(), { compression: false, dedup: true })
-  assert.deepEqual(resolveConfig({ compression: true }), { compression: true, dedup: true })
+  assert.deepEqual(resolveConfig(), { compression: false, dedup: true, selector: "head-tail" })
+  assert.deepEqual(resolveConfig({ compression: true }), {
+    compression: true,
+    dedup: true,
+    selector: "head-tail",
+  })
   assert.deepEqual(
     resolveConfig({ compression: true, dedup: false }, { compression: false }),
-    { compression: false, dedup: false },
+    { compression: false, dedup: false, selector: "head-tail" },
   )
 })
 
@@ -51,19 +55,36 @@ test("resolveConfig: fields resolve independently", () => {
   assert.deepEqual(resolveConfig({ compression: true }, { dedup: false }), {
     compression: true,
     dedup: false,
+    selector: "head-tail",
   })
 })
 
-test("asConfigOverride: narrows to booleans, drops junk", () => {
+test("resolveConfig: selector resolves session > global > default", () => {
+  assert.equal(resolveConfig({ selector: "head-tail" }).selector, "head-tail")
+  assert.equal(
+    resolveConfig({ selector: "head-tail" }, { selector: "head-tail" }).selector,
+    "head-tail",
+  )
+  // A defaults override wins only when neither level sets the field.
+  assert.equal(resolveConfig({}, {}, { compression: false, dedup: true, selector: "head-tail" }).selector, "head-tail")
+})
+
+test("asConfigOverride: narrows to booleans/selector names, drops junk", () => {
   assert.deepEqual(asConfigOverride(undefined), {})
   assert.deepEqual(asConfigOverride(null), {})
   assert.deepEqual(asConfigOverride([1, 2]), {})
   assert.deepEqual(asConfigOverride({ compression: "yes", dedup: true }), { dedup: true })
   assert.deepEqual(asConfigOverride({ compression: false, extra: 1 }), { compression: false })
+  assert.deepEqual(asConfigOverride({ selector: "head-tail" }), { selector: "head-tail" })
+  assert.deepEqual(asConfigOverride({ selector: "nope" }), {})
+  assert.deepEqual(asConfigOverride({ selector: 3 }), {})
 })
 
-test("describeConfig: on/off summary", () => {
-  assert.equal(describeConfig({ compression: false, dedup: true }), "compression off, dedup on")
+test("describeConfig: on/off summary plus the selector", () => {
+  assert.equal(
+    describeConfig({ compression: false, dedup: true, selector: "head-tail" }),
+    "compression off, dedup on, selector head-tail",
+  )
 })
 
 test("storage: global + session overrides round-trip independently", async () => {
@@ -83,8 +104,16 @@ test("effectiveConfig: merges both levels", async () => {
   await saveGlobalConfig(storage, { compression: true })
   await saveSessionConfig(storage, "ses_1", { compression: false })
 
-  assert.deepEqual(await effectiveConfig(storage, "ses_1"), { compression: false, dedup: true })
-  assert.deepEqual(await effectiveConfig(storage, "ses_2"), { compression: true, dedup: true })
+  assert.deepEqual(await effectiveConfig(storage, "ses_1"), {
+    compression: false,
+    dedup: true,
+    selector: "head-tail",
+  })
+  assert.deepEqual(await effectiveConfig(storage, "ses_2"), {
+    compression: true,
+    dedup: true,
+    selector: "head-tail",
+  })
 })
 
 test("applyConfigPatch: merges at the chosen scope; reset clears it", async () => {

@@ -9,7 +9,8 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import ctxGuard, { guarded } from "./index.ts"
-import { COMPRESSION_OPTIONS, DEDUP_MARKER, compressResult, textLengthOf } from "./lib/toolhooks.ts"
+import { DEDUP_MARKER, compressResult, textLengthOf } from "./lib/toolhooks.ts"
+import { headTail } from "./lib/selectors.ts"
 
 type AnyRecord = Record<string, any>
 
@@ -414,7 +415,7 @@ test("execute.after: compression savings are recorded when enabled", async () =>
   const originalText = "x".repeat(6000)
   const expectedOmitted =
     originalText.length -
-    textLengthOf(compressResult({ content: [{ type: "text", text: originalText }] }, COMPRESSION_OPTIONS))
+    textLengthOf(compressResult({ content: [{ type: "text", text: originalText }] }, headTail.select))
 
   const savings = h.store.get("session:ses_test:savings") as AnyRecord
   assert.equal(savings.compressions, 1)
@@ -753,5 +754,37 @@ test("config command: parses `compression off` and scopes with `session`", async
 
   await command.execute({ sessionID: "ses_test", prompt: "reset" })
   assert.equal(h.store.has("ctx-guard:config"), false)
+})
+
+test("config tool: sets the selector; an unknown selector is ignored", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+  const tool = added[0]
+
+  const out = await tool.execute({ selector: "head-tail" }, { sessionID: "ses_test" })
+  assert.match(out.content[0].text, /selector head-tail/)
+  assert.deepEqual(h.store.get("ctx-guard:config"), { selector: "head-tail" })
+
+  // Unknown selector: silently ignored, no write for the other session.
+  await tool.execute({ selector: "nope" }, { sessionID: "ses_other" })
+  assert.equal(h.store.has("session:ses_other:ctx-guard"), false)
+})
+
+test("config command: parses `selector head-tail`; unknown selector writes nothing", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const commands = commandCollector()
+  h.commandTransforms[0](commands.editor)
+  const command = commands.added[0]
+
+  await command.execute({ sessionID: "ses_test", prompt: "selector head-tail" })
+  assert.deepEqual(h.store.get("ctx-guard:config"), { selector: "head-tail" })
+
+  await command.execute({ sessionID: "ses_test", prompt: "selector nope" })
+  assert.deepEqual(h.store.get("ctx-guard:config"), { selector: "head-tail" })
 })
 

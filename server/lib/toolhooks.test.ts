@@ -23,6 +23,7 @@ import {
 } from "./toolhooks.ts"
 
 const OPTS = { minChars: 100, headChars: 20, tailChars: 10 }
+const select = (text: string) => compressText(text, OPTS)
 
 // --- isTargetTool -----------------------------------------------------------
 
@@ -91,7 +92,7 @@ test("textLengthOf: sums string content and text parts only", () => {
 
 test("compressResult: compresses string content", () => {
   const result = { content: "a".repeat(150), metadata: { exit: 0 } }
-  const out = compressResult(result, OPTS)
+  const out = compressResult(result, select)
 
   assert.notEqual(out, result)
   assert.match(String(out.content), /chars omitted/)
@@ -105,7 +106,7 @@ test("compressResult: array content compresses text parts and leaves file parts"
     output: { exit: 0, truncated: false },
     metadata: { shell: "ok" },
   }
-  const out = compressResult(result, OPTS)
+  const out = compressResult(result, select)
   const parts = out.content as Array<Record<string, unknown>>
 
   assert.match(String(parts[0].text), /chars omitted/)
@@ -118,19 +119,19 @@ test("compressResult: array content compresses text parts and leaves file parts"
 test("compressResult: immutable — the caller's object is not mutated", () => {
   const original = { content: [{ type: "text", text: "c".repeat(150) }] }
   const snapshot = JSON.stringify(original)
-  compressResult(original, OPTS)
+  compressResult(original, select)
   assert.equal(JSON.stringify(original), snapshot)
 })
 
 test("compressResult: small or structured-only results return the same object", () => {
   const small = { content: "tiny" }
-  assert.equal(compressResult(small, OPTS), small)
+  assert.equal(compressResult(small, select), small)
 
   const structured = { output: { exit: 0, output: "x".repeat(9000) } }
-  assert.equal(compressResult(structured, OPTS), structured)
+  assert.equal(compressResult(structured, select), structured)
 
   const empty = {}
-  assert.equal(compressResult(empty, OPTS), empty)
+  assert.equal(compressResult(empty, select), empty)
 })
 
 // --- replaceResultText ------------------------------------------------------

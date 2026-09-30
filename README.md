@@ -27,10 +27,11 @@ compiler.
 
 Implemented (server side):
 
-- **Runtime config switch** — compression and dedup are toggled at runtime and
-  persist in `ctx.storage` (session override → global override → default). The
-  agent toggles via the `ctxguard_config` tool; a human via `/ctx-guard`. See
-  "Runtime config" below. Defaults: compression **OFF**, dedup **ON**.
+- **Runtime config switch** — compression, selector and dedup are toggled at
+  runtime and persist in `ctx.storage` (session override → global override →
+  default). The agent toggles via the `ctxguard_config` tool; a human via
+  `/ctx-guard`. See "Runtime config" below. Defaults: compression **OFF**,
+  dedup **ON**, selector **head-tail**.
 - **Compaction injection** — `ctx.session.hook("compaction")` pushes a
   mode-aware continuity block (agent mode, current task, last command, recent
   decisions, active files, last occupancy reading) into the compaction system
@@ -42,9 +43,12 @@ Implemented (server side):
 - **Continuity state** — persisted per session via `ctx.storage`, so it survives
   plugin hot reloads (module state does not).
 - **Tool-output compression** — `ctx.tool.hook("execute.after")` replaces an
-  oversized `shell`/`bash` result with `head + "… [ctx-guard: N chars omitted] …"
-  + tail` before it is committed. Defaults: 4000-char threshold, 1600 head,
-  1200 tail.
+  oversized `shell`/`bash` result with a compaction of it before it is
+  committed. The compaction is chosen by a pluggable **selector**
+  (`server/lib/selectors.ts`); the default `head-tail` keeps
+  `head + "… [ctx-guard: N chars omitted] …" + tail`. Defaults: 4000-char
+  threshold, 1600 head, 1200 tail. Swapping the selector changes the method
+  without touching the hook.
 - **Duplicate suppression** — a repeated identical large result (> 1000 chars,
   same tool + arguments) collapses to a marker. The per-session signature ring
   lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16.
@@ -66,17 +70,19 @@ Not yet implemented: RPC + sidebar display (Phase 4), CLI plugin (Phase 5).
 
 ## Runtime config
 
-Compression and dedup are runtime-toggleable and persist in `ctx.storage`
-(the `kv` table in `opencode.db`), so they survive reloads and restarts.
-Precedence: **session override → global override → default**
-(compression OFF, dedup ON).
+Compression, selector and dedup are runtime-toggleable and persist in
+`ctx.storage` (the `kv` table in `opencode.db`), so they survive reloads and
+restarts. Precedence: **session override → global override → default**
+(compression OFF, dedup ON, selector head-tail).
 
-- **Agent:** call the `ctxguard_config` tool — `{ compression?, dedup?, session?, reset? }`.
-  Set `session: true` to scope a change to the current session only (e.g. while
-  doing critical work). It returns the resulting effective config.
+- **Agent:** call the `ctxguard_config` tool —
+  `{ compression?, selector?, dedup?, session?, reset? }`. Set `session: true`
+  to scope a change to the current session only (e.g. while doing critical
+  work). It returns the resulting effective config.
 - **Human:** run `/ctx-guard compression off`, `/ctx-guard dedup on`,
-  `/ctx-guard reset [session]`. (V2 commands cannot return output, so this
-  applies silently; confirm via the `ctxguard_config` tool.)
+  `/ctx-guard selector head-tail`, `/ctx-guard reset [session]`. (V2 commands
+  cannot return output, so this applies silently; confirm via the
+  `ctxguard_config` tool.)
 - **Read path:** `execute.after` reads the effective config fresh each call, so
   a toggle takes effect on the next tool call — no hot reload needed.
 
@@ -87,10 +93,11 @@ Precedence: **session override → global override → default**
 server/
   index.ts              plugin entry: { id, setup } + hook wiring + tool/command
   lib/compaction.ts     buildContinuityBlock (pure)
-  lib/config.ts         runtime compression/dedup switch (persisted) + resolver
+  lib/config.ts         runtime compression/dedup/selector switch (persisted) + resolver
   lib/quality.ts        token estimate + occupancy (pure)
   lib/storage.ts        per-session continuity + savings + token usage (ctx.storage)
-  lib/toolhooks.ts      compression + dedup + signatures + savings ledger (pure)
+  lib/selectors.ts      pluggable compression selectors (head-tail, …) (pure, leaf)
+  lib/toolhooks.ts      compression application + dedup + signatures + savings (pure)
   lib/structure.ts      structural report + prune plan (pure)
   *.test.ts             node:test suites (no framework)
 bench/
