@@ -29,7 +29,7 @@ import type { SessionCompaction, SessionContext } from "@opencode/plugin/promise
 import type { Model } from "@opencode/schema/model"
 import { buildContinuityBlock } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
-import { loadContinuity, saveContinuity, type ContinuityState } from "./lib/storage.ts"
+import { loadContinuity, loadSavings, saveContinuity, saveSavings, type ContinuityState } from "./lib/storage.ts"
 import {
   PRUNE_OPTIONS,
   STRUCTURE_PRUNE_ENABLED,
@@ -52,6 +52,8 @@ import {
   DEDUP_ENABLED,
   DEDUP_MARKER,
   DEDUP_MIN_CHARS,
+  addCompression,
+  addDedup,
   commandOf,
   compressResult,
   isTargetTool,
@@ -473,6 +475,16 @@ const ctxGuard: Plugin.Plugin = {
             const recent = await loadRecentSignatures(ctx.storage, event.sessionID)
             if (recent.includes(signature)) {
               event.result = replaceResultText(event.result, DEDUP_MARKER)
+              // Measure: the full text would have been committed otherwise.
+              const saved = Math.max(0, text - DEDUP_MARKER.length)
+              if (saved > 0) {
+                await saveSavings(
+                  ctx.storage,
+                  event.sessionID,
+                  addDedup(await loadSavings(ctx.storage, event.sessionID), text),
+                )
+                console.error(`[ctx-guard] savings session=${event.sessionID} event=dedup chars=${saved}`)
+              }
               return
             }
             await saveRecentSignatures(ctx.storage, event.sessionID, [...recent, signature])
@@ -481,7 +493,24 @@ const ctxGuard: Plugin.Plugin = {
           // Then compress: head + tail with an omission marker. Only the result
           // that is about to be committed is rewritten — never the transcript.
           if (COMPRESSION_ENABLED) {
-            event.result = compressResult(event.result, COMPRESSION_OPTIONS)
+            const compressed = compressResult(event.result, COMPRESSION_OPTIONS)
+            if (compressed !== event.result) {
+              // Mutate first (the primary job), then measure best-effort: a
+              // storage failure must never undo an already-applied compression.
+              event.result = compressed
+              const compressedLen = textLengthOf(compressed)
+              const omitted = text - compressedLen
+              if (omitted > 0) {
+                await saveSavings(
+                  ctx.storage,
+                  event.sessionID,
+                  addCompression(await loadSavings(ctx.storage, event.sessionID), text, compressedLen),
+                )
+                console.error(
+                  `[ctx-guard] savings session=${event.sessionID} event=compress chars=${omitted}`,
+                )
+              }
+            }
           }
         }),
       ),

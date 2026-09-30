@@ -8,6 +8,7 @@
  * stripper, so this module has no runtime dependency on the SDK.
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
+import type { SavingsLedger } from "./toolhooks.ts"
 
 export type ContinuityState = {
   lastTask: string
@@ -55,4 +56,39 @@ export async function saveContinuity(
   state: ContinuityState,
 ): Promise<void> {
   await storage.set(sessionKey(sessionID), state as unknown as Parameters<StorageDomain["set"]>[1])
+}
+
+// --- Savings ledger (per session) -------------------------------------------
+
+/** Stable storage key for a session's compression/dedup savings tally. */
+export const savingsKey = (sessionID: string): string => `session:${sessionID}:savings`
+
+/** Narrow an arbitrary stored JSON value to a SavingsLedger. */
+export function asSavings(value: unknown): SavingsLedger {
+  const base: SavingsLedger = { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return base
+  const v = value as Record<string, unknown>
+  const num = (key: string): number =>
+    typeof v[key] === "number" && Number.isFinite(v[key]) ? (v[key] as number) : 0
+  return {
+    compressions: num("compressions"),
+    charsOmitted: num("charsOmitted"),
+    dedups: num("dedups"),
+    charsDeduped: num("charsDeduped"),
+  }
+}
+
+export async function loadSavings(
+  storage: StorageDomain,
+  sessionID: string,
+): Promise<SavingsLedger> {
+  return asSavings(await storage.get(savingsKey(sessionID)))
+}
+
+export async function saveSavings(
+  storage: StorageDomain,
+  sessionID: string,
+  ledger: SavingsLedger,
+): Promise<void> {
+  await storage.set(savingsKey(sessionID), ledger as unknown as Parameters<StorageDomain["set"]>[1])
 }

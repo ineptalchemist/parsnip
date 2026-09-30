@@ -5,7 +5,9 @@
   "type": "module",
   "description": "Cache-preserving context manager for OpenCode V2 (server plugin)",
   "scripts": {
-    "test": "node --test 'server/**/*.test.ts'"
+    "test": "node --test 'server/**/*.test.ts'",
+    "bench": "node bench/run.ts",
+    "savings": "node bench/read-savings.ts"
   },
   "devDependencies": {
     "@opencode/plugin": "2.0.20"

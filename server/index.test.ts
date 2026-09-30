@@ -9,7 +9,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import ctxGuard, { guarded } from "./index.ts"
-import { DEDUP_MARKER } from "./lib/toolhooks.ts"
+import { COMPRESSION_OPTIONS, DEDUP_MARKER, compressResult, textLengthOf } from "./lib/toolhooks.ts"
 
 type AnyRecord = Record<string, any>
 
@@ -334,6 +334,51 @@ test("execute.after: keeps its dedup memory in storage, not module state", async
   const history = h.store.get("session:ses_test:toolHistory") as string[]
   assert.equal(history.length, 1)
   assert.ok(history[0].startsWith("shell:"))
+})
+
+test("execute.after: records compression + dedup savings in storage, not the event", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const first = toolEvent()
+  await h.hooks["execute.after"](first)
+
+  // The second identical call is a duplicate, not a fresh compression.
+  const second = toolEvent()
+  await h.hooks["execute.after"](second)
+
+  const originalText = "x".repeat(6000)
+  const expectedOmitted =
+    originalText.length -
+    textLengthOf(compressResult({ content: [{ type: "text", text: originalText }] }, COMPRESSION_OPTIONS))
+
+  const savings = h.store.get("session:ses_test:savings") as AnyRecord
+  assert.ok(savings, "no savings ledger persisted")
+  assert.equal(savings.compressions, 1)
+  assert.equal(savings.charsOmitted, expectedOmitted)
+  assert.ok(savings.charsOmitted > 3000, "compression should drop the bulk of the middle")
+
+  assert.equal(savings.dedups, 1)
+  assert.equal(savings.charsDeduped, originalText.length - DEDUP_MARKER.length)
+})
+
+test("execute.after: logs a parseable savings line per event", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const lines: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => void lines.push(args.map(String).join(" "))
+  try {
+    await h.hooks["execute.after"](toolEvent()) // compress
+    await h.hooks["execute.after"](toolEvent()) // dedup
+  } finally {
+    console.error = original
+  }
+
+  const joined = lines.join("\n")
+  assert.match(joined, /\[ctx-guard\] savings session=ses_test event=compress chars=\d+/)
+  assert.match(joined, /\[ctx-guard\] savings session=ses_test event=dedup chars=\d+/)
 })
 
 test("execute.before: records the last command without mutating input", async () => {

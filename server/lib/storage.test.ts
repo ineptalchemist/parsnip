@@ -1,6 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { asContinuity, sessionKey } from "./storage.ts"
+import type { StorageDomain } from "@opencode/plugin/promise/storage"
+import { asContinuity, asSavings, loadSavings, saveSavings, savingsKey, sessionKey } from "./storage.ts"
 
 test("sessionKey: namespaces by session", () => {
   assert.equal(sessionKey("ses_abc"), "session:ses_abc")
@@ -41,4 +42,53 @@ test("asContinuity: preserves a complete record", () => {
     lastCommand: "npm test",
   }
   assert.deepEqual(asContinuity(input), input)
+})
+
+// --- savings ledger ---------------------------------------------------------
+
+test("savingsKey: namespaces by session", () => {
+  assert.equal(savingsKey("ses_abc"), "session:ses_abc:savings")
+})
+
+test("asSavings: rejects non-objects and fills safe defaults", () => {
+  assert.deepEqual(asSavings(undefined), { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 })
+  assert.deepEqual(asSavings(null), { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 })
+  assert.deepEqual(asSavings([1, 2]), { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0 })
+  assert.deepEqual(asSavings({ compressions: 3, bogus: 9 }), {
+    compressions: 3,
+    charsOmitted: 0,
+    dedups: 0,
+    charsDeduped: 0,
+  })
+})
+
+test("loadSavings / saveSavings: round-trip through storage", async () => {
+  const store = new Map<string, unknown>()
+  const storage = {
+    get: async (key: string) => store.get(key),
+    set: async (key: string, value: unknown) => void store.set(key, value),
+  } as unknown as StorageDomain
+
+  assert.deepEqual(await loadSavings(storage, "ses_1"), {
+    compressions: 0,
+    charsOmitted: 0,
+    dedups: 0,
+    charsDeduped: 0,
+  })
+
+  await saveSavings(storage, "ses_1", { compressions: 2, charsOmitted: 6400, dedups: 1, charsDeduped: 5900 })
+  assert.deepEqual(await loadSavings(storage, "ses_1"), {
+    compressions: 2,
+    charsOmitted: 6400,
+    dedups: 1,
+    charsDeduped: 5900,
+  })
+
+  // A different session has its own tally.
+  assert.deepEqual(await loadSavings(storage, "ses_2"), {
+    compressions: 0,
+    charsOmitted: 0,
+    dedups: 0,
+    charsDeduped: 0,
+  })
 })

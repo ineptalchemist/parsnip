@@ -59,6 +59,66 @@ export function omissionMarker(omittedChars: number): string {
   return `… [ctx-guard: ${omittedChars} chars omitted] …`
 }
 
+// --- Savings ledger ---------------------------------------------------------
+//
+// Pure tally of what compression + dedup actually removed, per session. This is
+// the measurement surface: the "chars omitted" numbers are exact, because the
+// hook rewrites a result *about to be committed*, so the pre-rewrite text length
+// is exactly what would otherwise have entered the transcript.
+
+/** Per-session tally of what compression + dedup removed (in chars). */
+export type SavingsLedger = {
+  /** Number of results compressed (head + tail + omission marker). */
+  compressions: number
+  /** Total chars dropped by compression across the session. */
+  charsOmitted: number
+  /** Number of repeated large results collapsed to a marker. */
+  dedups: number
+  /** Total chars replaced by the dedup marker across the session. */
+  charsDeduped: number
+}
+
+export const emptySavings = (): SavingsLedger => ({
+  compressions: 0,
+  charsOmitted: 0,
+  dedups: 0,
+  charsDeduped: 0,
+})
+
+/**
+ * Fold a compression event into the ledger. The omitted chars are the
+ * difference between the pre- and post-compression text lengths (the omission
+ * marker is already part of the compressed result, so the delta is exact).
+ */
+export function addCompression(
+  ledger: SavingsLedger,
+  originalLen: number,
+  compressedLen: number,
+): SavingsLedger {
+  const omitted = Math.max(0, originalLen - compressedLen)
+  if (omitted === 0) return ledger
+  return {
+    ...ledger,
+    compressions: ledger.compressions + 1,
+    charsOmitted: ledger.charsOmitted + omitted,
+  }
+}
+
+/** Fold a dedup event: the replaced text minus the marker length is the saving. */
+export function addDedup(
+  ledger: SavingsLedger,
+  originalLen: number,
+  markerLen: number = DEDUP_MARKER.length,
+): SavingsLedger {
+  const saved = Math.max(0, originalLen - markerLen)
+  if (saved === 0) return ledger
+  return {
+    ...ledger,
+    dedups: ledger.dedups + 1,
+    charsDeduped: ledger.charsDeduped + saved,
+  }
+}
+
 // --- Target selection -------------------------------------------------------
 
 /** `shell`/`bash`, case-insensitively, or any tool name containing one of them. */

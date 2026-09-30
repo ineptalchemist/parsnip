@@ -3,10 +3,13 @@ import assert from "node:assert/strict"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import {
   DEDUP_MARKER,
+  addCompression,
+  addDedup,
   asSignatures,
   commandOf,
   compressResult,
   compressText,
+  emptySavings,
   isTargetTool,
   loadRecentSignatures,
   omissionMarker,
@@ -213,4 +216,48 @@ test("recent signatures: round-trip through storage, capped at the memory size",
   assert.deepEqual(await loadRecentSignatures(storage, "ses_1"), ["b", "c", "d"])
   // A different session has its own memory.
   assert.deepEqual(await loadRecentSignatures(storage, "ses_2"), [])
+})
+
+// --- savings ledger ---------------------------------------------------------
+
+test("emptySavings: all fields zero", () => {
+  assert.deepEqual(emptySavings(), {
+    compressions: 0,
+    charsOmitted: 0,
+    dedups: 0,
+    charsDeduped: 0,
+  })
+})
+
+test("addCompression: accumulates the exact omitted delta", () => {
+  let ledger = emptySavings()
+  ledger = addCompression(ledger, 6000, 2800)
+  assert.deepEqual(ledger, { compressions: 1, charsOmitted: 3200, dedups: 0, charsDeduped: 0 })
+
+  ledger = addCompression(ledger, 5000, 3000)
+  assert.deepEqual(ledger, { compressions: 2, charsOmitted: 5200, dedups: 0, charsDeduped: 0 })
+})
+
+test("addCompression: a zero/negative delta changes nothing", () => {
+  const ledger = emptySavings()
+  assert.equal(addCompression(ledger, 100, 100), ledger)
+  assert.equal(addCompression(ledger, 100, 200), ledger)
+})
+
+test("addDedup: accumulates chars replaced by the marker", () => {
+  const markerLen = DEDUP_MARKER.length
+  let ledger = emptySavings()
+  ledger = addDedup(ledger, 6000)
+  assert.equal(ledger.dedups, 1)
+  assert.equal(ledger.charsDeduped, 6000 - markerLen)
+
+  ledger = addDedup(ledger, 4000, markerLen)
+  assert.equal(ledger.dedups, 2)
+  assert.equal(ledger.charsDeduped, 10000 - 2 * markerLen)
+})
+
+test("addDedup: nothing saved when the result is no larger than the marker", () => {
+  const ledger = emptySavings()
+  assert.equal(addDedup(ledger, DEDUP_MARKER.length), ledger)
+  assert.equal(addDedup(ledger, 0), ledger)
 })
