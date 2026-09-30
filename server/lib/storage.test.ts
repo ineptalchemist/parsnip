@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
-import { asContinuity, asSavings, loadSavings, saveSavings, savingsKey, sessionKey } from "./storage.ts"
+import { asContinuity, asSavings, asTokenUsage, loadSavings, loadTokenUsage, saveSavings, saveTokenUsage, savingsKey, sessionKey, tokenUsageFrom, tokenUsageKey } from "./storage.ts"
 
 test("sessionKey: namespaces by session", () => {
   assert.equal(sessionKey("ses_abc"), "session:ses_abc")
@@ -91,4 +91,98 @@ test("loadSavings / saveSavings: round-trip through storage", async () => {
     dedups: 0,
     charsDeduped: 0,
   })
+})
+
+// --- token usage ledger -----------------------------------------------------
+
+test("tokenUsageKey: namespaces by session", () => {
+  assert.equal(tokenUsageKey("ses_abc"), "session:ses_abc:usage")
+})
+
+test("asTokenUsage: rejects non-objects and arrays", () => {
+  assert.equal(asTokenUsage(undefined), undefined)
+  assert.equal(asTokenUsage(null), undefined)
+  assert.equal(asTokenUsage("nope"), undefined)
+  assert.equal(asTokenUsage([1, 2, 3]), undefined)
+})
+
+test("asTokenUsage: fills safe defaults and drops junk", () => {
+  assert.deepEqual(asTokenUsage({ input: 10, bogus: 9, updatedAt: 5 }), {
+    input: 10,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: undefined,
+    updatedAt: 5,
+  })
+  assert.deepEqual(asTokenUsage({ input: Number.NaN, cost: "free" }), {
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: undefined,
+    updatedAt: 0,
+  })
+})
+
+test("tokenUsageFrom: flattens the nested cache and keeps cost", () => {
+  const state = tokenUsageFrom(
+    { input: 101689, output: 358, reasoning: 0, cache: { read: 101504, write: 0 } },
+    0.42,
+    1234,
+  )
+  assert.deepEqual(state, {
+    input: 101689,
+    output: 358,
+    reasoning: 0,
+    cacheRead: 101504,
+    cacheWrite: 0,
+    cost: 0.42,
+    updatedAt: 1234,
+  })
+})
+
+test("tokenUsageFrom: tolerates missing/malformed payloads", () => {
+  assert.deepEqual(tokenUsageFrom(undefined, undefined, 1), {
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: undefined,
+    updatedAt: 1,
+  })
+  assert.deepEqual(tokenUsageFrom("nope", "expensive", 2), {
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: undefined,
+    updatedAt: 2,
+  })
+})
+
+test("loadTokenUsage / saveTokenUsage: round-trip, overwrite is cumulative", async () => {
+  const store = new Map<string, unknown>()
+  const storage = {
+    get: async (key: string) => store.get(key),
+    set: async (key: string, value: unknown) => void store.set(key, value),
+  } as unknown as StorageDomain
+
+  assert.equal(await loadTokenUsage(storage, "ses_1"), undefined)
+
+  const first = tokenUsageFrom({ input: 100, output: 5, cache: { read: 40 } }, 0.01, 1)
+  await saveTokenUsage(storage, "ses_1", first)
+  assert.deepEqual(await loadTokenUsage(storage, "ses_1"), first)
+
+  // The event is cumulative: a later write overwrites with the larger total.
+  const second = tokenUsageFrom({ input: 250, output: 12, cache: { read: 180 } }, 0.03, 2)
+  await saveTokenUsage(storage, "ses_1", second)
+  assert.deepEqual(await loadTokenUsage(storage, "ses_1"), second)
+
+  // A different session is independent.
+  assert.equal(await loadTokenUsage(storage, "ses_2"), undefined)
 })

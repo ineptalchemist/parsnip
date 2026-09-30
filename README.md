@@ -51,12 +51,18 @@ Implemented (server side):
 - **Savings ledger** — every compression/dedup event folds its exact char delta
   into a per-session tally in `ctx.storage` under `session:<id>:savings`. This is
   the measurement surface (see "Measuring effects").
+- **Real token usage** — the plugin subscribes to `session.usage.updated` and
+  writes the session's cumulative usage to `session:<id>:usage` (`input`,
+  `output`, `reasoning`, `cache.read`, `cache.write`, `cost`). This is the
+  authoritative token measurement and it replaces the old `chars / 4` estimate:
+  `cache.read` is the cache-preservation signal (how much of the prompt was
+  served from cache).
 - **Structural report** (Phase 3) — an unused/unusable MCP server + skill report
   computed and persisted per session, with an opt-in, double-gated,
   `disabled: true`-only prune path. Report-only by default
   (`STRUCTURE_PRUNE_ENABLED = false`).
 
-Not yet implemented: RPC + `token_status` (Phase 4), CLI plugin (Phase 5).
+Not yet implemented: RPC + sidebar display (Phase 4), CLI plugin (Phase 5).
 
 ## Runtime config
 
@@ -83,13 +89,13 @@ server/
   lib/compaction.ts     buildContinuityBlock (pure)
   lib/config.ts         runtime compression/dedup switch (persisted) + resolver
   lib/quality.ts        token estimate + occupancy (pure)
-  lib/storage.ts        per-session continuity + savings (ctx.storage)
+  lib/storage.ts        per-session continuity + savings + token usage (ctx.storage)
   lib/toolhooks.ts      compression + dedup + signatures + savings ledger (pure)
   lib/structure.ts      structural report + prune plan (pure)
   *.test.ts             node:test suites (no framework)
 bench/
   run.ts                offline ceiling benchmark (npm run bench)
-  read-savings.ts       dump per-session savings from opencode.db (npm run savings)
+  read-savings.ts       dump per-session tokens + char savings from opencode.db
 ```
 
 ## How it loads
@@ -123,31 +129,30 @@ npm run savings   # dump per-session savings ledgers from opencode.db (read-only
 
 ## Measuring effects
 
-There are three numbers that matter, and two are exact:
+Two ledgers are recorded per session, and they measure different things.
 
-1. **Mechanism ceiling (offline, deterministic):** `npm run bench` pushes a
+1. **Real token usage (live, measured):** the plugin subscribes to
+   `session.usage.updated` and stores the session's cumulative usage at
+   `session:<id>:usage` — `input` (fresh, uncached), `output`, `reasoning`, and
+   `cache.read` / `cache.write`. Total prompt input is
+   `input + cache.read + cache.write`, and
+   `cache.read / (input + cache.read + cache.write)` is the cache-preservation
+   signal: a high ratio means the live prefix stayed cached. This is *measured
+   provider usage*, not an estimate.
+2. **Characters removed by the transforms (live, exact):** every
+   compression/dedup folds its exact char delta into `session:<id>:savings`
+   (`compressions`/`charsOmitted`, `dedups`/`charsDeduped`). For a compression
+   the delta is `original - compressed`; for a dedup it is
+   `original - marker.length`. These are **characters, not tokens** — they are
+   never converted.
+3. **Mechanism ceiling (offline, deterministic):** `npm run bench` pushes a
    realistic shell-output corpus through the pure `compressText` / dedup
-   functions. It shows that any oversized result collapses to a fixed
-   ~2.8k-char head+tail shape regardless of input size — a ~95% ceiling on the
-   sample corpus.
-2. **Real-world uptake (live, exact, per session):** the plugin folds every
-   compression/dedup event into `session:<id>:savings` in `ctx.storage`. Read it
-   back with `npm run savings`. **This is the authoritative channel** — plugin
-   `console.log`/`console.error` does *not* reach `opencode.log`, so the log is
-   not a measurement source. The savings values are exact chars: for a
-   compression they are `original - compressed`, and for a dedup
-   `original - marker.length`.
-3. **Token cost (real, deferred):** `chars` must be converted to tokens. The
-   `chars / 4` heuristic is uncalibrated; the log does emit real
-   `session generation usage diagnostic` records (`AI.Usage` with
-   `nonCachedInputTokens` / `cacheReadInputTokens`), but those are keyed by
-   `run`/`span`, not session, so calibrating chars→tokens and measuring cache
-   preservation is left as a follow-up (Phase 4's `token_status`).
+   functions — a ~95% ceiling on the sample corpus.
 
-A first live reading (the session that built this feature): 2 compressions
-(−25 697 chars) + 1 dedup (−11 932 chars) = −37 629 chars ≈ −9 408 tokens
-(`chars / 4`), including a single repeated 12 000-char command whose second run
-collapsed to a 68-char marker.
+`npm run savings` prints both live ledgers. It reads `opencode.db` directly
+because plugin `console.log`/`console.error` does *not* reach `opencode.log`.
+The old `~chars / 4` "token estimate" was an uncalibrated guess and has been
+removed in favour of the measured `session.usage.updated` numbers.
 
 Note: native `tool_output` truncation (`max_lines: 500` / `max_bytes: 20 000`)
 runs *before* `execute.after`, so compression only earns its keep on results

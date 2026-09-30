@@ -31,7 +31,15 @@ import type { CommandEditor } from "@opencode/plugin/promise/command"
 import type { Model } from "@opencode/schema/model"
 import { buildContinuityBlock } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
-import { loadContinuity, loadSavings, saveContinuity, saveSavings, type ContinuityState } from "./lib/storage.ts"
+import {
+  loadContinuity,
+  loadSavings,
+  saveContinuity,
+  saveSavings,
+  saveTokenUsage,
+  tokenUsageFrom,
+  type ContinuityState,
+} from "./lib/storage.ts"
 import {
   applyConfigPatch,
   describeConfig,
@@ -664,7 +672,44 @@ const ctxGuard: Plugin.Plugin = {
       ),
     )
 
+    // --- Real token usage capture (read-only observer) ------------------------
+    // `session.usage.updated` carries the session's CUMULATIVE token usage
+    // (confirmed against the OpenCode client, which assigns data.cost/tokens
+    // straight onto session.info), so each write OVERWRITES `session:<id>:usage`
+    // rather than folding. This is the authoritative token measurement that
+    // replaces the uncalibrated chars/4 estimate: `cacheRead` shows whether the
+    // live prefix stayed cached. Read-only with respect to the request — it only
+    // writes ctx.storage. The stream is aborted on dispose.
+    const usageAbort = new AbortController()
+    try {
+      const usageStream = ctx.event.subscribe({ signal: usageAbort.signal })
+      void (async () => {
+        try {
+          for await (const event of usageStream) {
+            if (event.type !== "session.usage.updated") continue
+            try {
+              await saveTokenUsage(
+                ctx.storage,
+                event.data.sessionID,
+                tokenUsageFrom(event.data.tokens, event.data.cost),
+              )
+            } catch (error) {
+              console.error("[ctx-guard] usage capture failed (ignored):", error)
+            }
+          }
+        } catch (error) {
+          // An abort ends the iterator normally; anything else is logged, not thrown.
+          if (!usageAbort.signal.aborted) {
+            console.error("[ctx-guard] event stream ended (ignored):", error)
+          }
+        }
+      })()
+    } catch (error) {
+      console.error("[ctx-guard] event subscription failed (ignored):", error)
+    }
+
     return async () => {
+      usageAbort.abort()
       for (const registration of registrations.reverse()) {
         try {
           await registration.dispose()
