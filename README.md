@@ -25,6 +25,11 @@ compiler.
 
 ## Status: Phase 3 (structural report) + savings ledger
 
+> **Current config (2026-09-30):** head+tail compression is **OFF**
+> (`COMPRESSION_ENABLED = false`) while the tool-output quality harness is built;
+> duplicate suppression stays **ON** (`DEDUP_ENABLED = true`). See "Measuring
+> effects".
+
 Implemented (server side):
 
 - **Compaction injection** — `ctx.session.hook("compaction")` pushes a
@@ -40,7 +45,7 @@ Implemented (server side):
 - **Tool-output compression** — `ctx.tool.hook("execute.after")` replaces an
   oversized `shell`/`bash` result with `head + "… [ctx-guard: N chars omitted] …"
   + tail` before it is committed. Defaults: 4000-char threshold, 1600 head,
-  1200 tail (`COMPRESSION_ENABLED`).
+  1200 tail. **Currently disabled** (`COMPRESSION_ENABLED = false`, 2026-09-30).
 - **Duplicate suppression** — a repeated identical large result (> 1000 chars,
   same tool + arguments) collapses to a marker. The per-session signature ring
   lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16

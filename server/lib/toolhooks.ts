@@ -31,7 +31,11 @@ export type ToolResultLike = {
 }
 
 // --- Defaults (flip off with the *_ENABLED flags) ---------------------------
-export const COMPRESSION_ENABLED = true
+//
+// COMPRESSION_ENABLED is currently OFF (2026-09-30) while the tool-output
+// quality harness is built (see README "Measuring effects"); DEDUP stays ON.
+// Flip back to `true` to re-enable head+tail truncation.
+export const COMPRESSION_ENABLED = false
 export const MIN_CHARS = 4000
 export const HEAD_CHARS = 1600
 export const TAIL_CHARS = 1200

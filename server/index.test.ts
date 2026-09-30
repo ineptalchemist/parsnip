@@ -9,7 +9,13 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import ctxGuard, { guarded } from "./index.ts"
-import { COMPRESSION_OPTIONS, DEDUP_MARKER, compressResult, textLengthOf } from "./lib/toolhooks.ts"
+import {
+  COMPRESSION_ENABLED,
+  COMPRESSION_OPTIONS,
+  DEDUP_MARKER,
+  compressResult,
+  textLengthOf,
+} from "./lib/toolhooks.ts"
 
 type AnyRecord = Record<string, any>
 
@@ -261,7 +267,7 @@ function toolEvent(overrides: AnyRecord = {}) {
   }
 }
 
-test("execute.after: compresses a large shell result, touching only content", async () => {
+test("execute.after: honors COMPRESSION_ENABLED on a large shell result", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
@@ -273,10 +279,14 @@ test("execute.after: compresses a large shell result, touching only content", as
   await h.hooks["execute.after"](event)
 
   const text = (event.result.content as Array<AnyRecord>)[0].text
-  assert.match(text, /\[ctx-guard: \d+ chars omitted\]/)
-  assert.ok(text.length < 3000, `expected a bounded placeholder, got ${text.length} chars`)
-  assert.equal(text.slice(0, 1600), "x".repeat(1600))
-  assert.ok(text.endsWith("x".repeat(1200)))
+  if (COMPRESSION_ENABLED) {
+    assert.match(text, /\[ctx-guard: \d+ chars omitted\]/)
+    assert.ok(text.length < 3000, `expected a bounded placeholder, got ${text.length} chars`)
+    assert.equal(text.slice(0, 1600), "x".repeat(1600))
+    assert.ok(text.endsWith("x".repeat(1200)))
+  } else {
+    assert.equal(text, "x".repeat(6000), "compression disabled: result must pass through")
+  }
   assert.equal(JSON.stringify(event.input), inputSnapshot, "execute.after mutated event.input")
   assert.equal(event.result.output, outputRef, "structured output must be untouched")
   assert.equal(event.result.metadata, metadataRef, "metadata must be untouched")
@@ -312,9 +322,14 @@ test("execute.after: suppresses a repeated identical large result", async () => 
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
+  // When compression is on, a first-seen large result is bounded; when off, it
+  // passes through. Either way a repeat is suppressed.
+  const firstBound = COMPRESSION_ENABLED ? /chars omitted/ : null
   const first = toolEvent()
   await h.hooks["execute.after"](first)
-  assert.match((first.result.content as Array<AnyRecord>)[0].text, /chars omitted/)
+  const firstText = (first.result.content as Array<AnyRecord>)[0].text
+  if (firstBound) assert.match(firstText, firstBound)
+  else assert.equal(firstText, "x".repeat(6000))
 
   const second = toolEvent()
   await h.hooks["execute.after"](second)
@@ -323,7 +338,9 @@ test("execute.after: suppresses a repeated identical large result", async () => 
   // A different command is not suppressed.
   const third = toolEvent({ input: { command: "printf other" } })
   await h.hooks["execute.after"](third)
-  assert.match((third.result.content as Array<AnyRecord>)[0].text, /chars omitted/)
+  const thirdText = (third.result.content as Array<AnyRecord>)[0].text
+  if (firstBound) assert.match(thirdText, firstBound)
+  else assert.equal(thirdText, "x".repeat(6000))
 })
 
 test("execute.after: keeps its dedup memory in storage, not module state", async () => {
@@ -336,7 +353,7 @@ test("execute.after: keeps its dedup memory in storage, not module state", async
   assert.ok(history[0].startsWith("shell:"))
 })
 
-test("execute.after: records compression + dedup savings in storage, not the event", async () => {
+test("execute.after: records dedup savings (and compression when enabled) in storage", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
@@ -348,15 +365,21 @@ test("execute.after: records compression + dedup savings in storage, not the eve
   await h.hooks["execute.after"](second)
 
   const originalText = "x".repeat(6000)
-  const expectedOmitted =
-    originalText.length -
-    textLengthOf(compressResult({ content: [{ type: "text", text: originalText }] }, COMPRESSION_OPTIONS))
 
   const savings = h.store.get("session:ses_test:savings") as AnyRecord
   assert.ok(savings, "no savings ledger persisted")
-  assert.equal(savings.compressions, 1)
-  assert.equal(savings.charsOmitted, expectedOmitted)
-  assert.ok(savings.charsOmitted > 3000, "compression should drop the bulk of the middle")
+
+  if (COMPRESSION_ENABLED) {
+    const expectedOmitted =
+      originalText.length -
+      textLengthOf(compressResult({ content: [{ type: "text", text: originalText }] }, COMPRESSION_OPTIONS))
+    assert.equal(savings.compressions, 1)
+    assert.equal(savings.charsOmitted, expectedOmitted)
+    assert.ok(savings.charsOmitted > 3000, "compression should drop the bulk of the middle")
+  } else {
+    assert.equal(savings.compressions, 0)
+    assert.equal(savings.charsOmitted, 0)
+  }
 
   assert.equal(savings.dedups, 1)
   assert.equal(savings.charsDeduped, originalText.length - DEDUP_MARKER.length)
@@ -377,7 +400,9 @@ test("execute.after: logs a parseable savings line per event", async () => {
   }
 
   const joined = lines.join("\n")
-  assert.match(joined, /\[ctx-guard\] savings session=ses_test event=compress chars=\d+/)
+  if (COMPRESSION_ENABLED) {
+    assert.match(joined, /\[ctx-guard\] savings session=ses_test event=compress chars=\d+/)
+  }
   assert.match(joined, /\[ctx-guard\] savings session=ses_test event=dedup chars=\d+/)
 })
 
