@@ -135,6 +135,75 @@ export function compressTokenBudget(text: string, o: TokenBudgetOptions): string
   return `${text.slice(0, head)}\n${omissionMarker(tail - head)}\n${text.slice(tail)}`
 }
 
+// --- Log compaction (for the log-compact selector) ---------------------------
+//
+// Structural compaction of shell output before any positional cut: strip ANSI
+// escapes (lossless) and collapse runs of identical consecutive lines to one
+// verbatim line plus a `[ctx-guard: ×N]` count marker. Distinct lines pass
+// through untouched.
+
+/** SGR/CSI escape sequences: colors, cursor moves. */
+const ANSI_CSI = /\x1b\[[0-9;?]*[A-Za-z]/g
+/** OSC sequences (hyperlinks, window titles), terminated by BEL or ST. */
+const ANSI_OSC = /\x1b\][^\x1b\x07]*(?:\x07|\x1b\\)/g
+
+/** Remove terminal escape sequences. Lossless for the visible text. */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_OSC, "").replace(ANSI_CSI, "")
+}
+
+/** Count marker for a run of identical lines. */
+export function runMarker(count: number): string {
+  return `[ctx-guard: ×${count}]`
+}
+
+/**
+ * Collapse a run of `>= minRun` identical consecutive lines to one verbatim line
+ * plus a count marker. Shorter runs (and all distinct lines) are left as-is.
+ */
+export function collapseRuns(text: string, minRun: number): string {
+  const lines = text.split("\n")
+  const out: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    let run = 1
+    while (i + run < lines.length && lines[i + run] === line) run += 1
+    if (run >= minRun) out.push(`${line}  ${runMarker(run)}`)
+    else for (let k = 0; k < run; k += 1) out.push(line)
+    i += run
+  }
+  return out.join("\n")
+}
+
+export type LogCompactOptions = {
+  /** Results at or below this many chars are left untouched. */
+  minChars: number
+  /** Minimum run length of identical consecutive lines to collapse. */
+  minRun: number
+  /** Head-tail bound applied when the compacted result is still oversized. */
+  fallback: CompressOptions
+}
+
+export const LOG_COMPACT_OPTIONS: LogCompactOptions = {
+  minChars: MIN_CHARS, // 4000 — same gate as head-tail
+  minRun: 3,
+  fallback: COMPRESSION_OPTIONS,
+}
+
+/**
+ * Strip ANSI escapes and collapse identical consecutive-line runs, then bound
+ * the result with head-tail when it is still oversized. Faithful: the retained
+ * text is verbatim; only `[ctx-guard: …]` count markers are added.
+ */
+export function compressLog(text: string, o: LogCompactOptions): string {
+  if (text.length <= o.minChars) return text
+  const compacted = collapseRuns(stripAnsi(text), o.minRun)
+  const bound = o.fallback.headChars + o.fallback.tailChars
+  if (compacted.length > bound) return compressText(compacted, o.fallback)
+  return compacted === text ? text : compacted
+}
+
 // --- Selector registry ------------------------------------------------------
 
 /**
@@ -142,7 +211,7 @@ export function compressTokenBudget(text: string, o: TokenBudgetOptions): string
  * lands; `SelectorName` is derived from it so the config surface and the
  * registry can never drift.
  */
-export const SELECTOR_NAMES = ["head-tail", "token-budget"] as const
+export const SELECTOR_NAMES = ["head-tail", "token-budget", "log-compact"] as const
 
 export type SelectorName = (typeof SELECTOR_NAMES)[number]
 
@@ -168,9 +237,20 @@ export const tokenBudget: CompressionSelector = {
   select: (text) => compressTokenBudget(text, TOKEN_BUDGET_OPTIONS),
 }
 
+/**
+ * Structural log compaction: ANSI strip + identical-consecutive-line collapse,
+ * bounded by head-tail. The highest ratio of the current selectors on
+ * repetitive shell output.
+ */
+export const logCompact: CompressionSelector = {
+  id: "log-compact",
+  select: (text) => compressLog(text, LOG_COMPACT_OPTIONS),
+}
+
 export const SELECTORS: Record<SelectorName, CompressionSelector> = {
   "head-tail": headTail,
   "token-budget": tokenBudget,
+  "log-compact": logCompact,
 }
 
 export function isSelectorName(value: unknown): value is SelectorName {

@@ -3,18 +3,23 @@ import assert from "node:assert/strict"
 import {
   COMPRESSION_OPTIONS,
   HEAD_CHARS,
+  LOG_COMPACT_OPTIONS,
   MIN_CHARS,
   SELECTORS,
   SELECTOR_NAMES,
   TAIL_CHARS,
   TOKEN_BUDGET_OPTIONS,
+  collapseRuns,
+  compressLog,
   compressText,
   compressTokenBudget,
   headTail,
   isSelectorName,
+  logCompact,
   omissionMarker,
   resolveSelector,
   selectWith,
+  stripAnsi,
   tokenBudget,
 } from "./selectors.ts"
 
@@ -120,4 +125,58 @@ test("compressTokenBudget: overlapping windows return the text unchanged", () =>
     compressTokenBudget(text, { minTokens: 0, headTokens: 4, tailTokens: 4, snapLimit: 0 }),
     text,
   )
+})
+
+// --- log-compact selector ---------------------------------------------------
+
+test("stripAnsi: removes SGR and OSC escapes, leaving visible text", () => {
+  assert.equal(stripAnsi("\x1b[31mred\x1b[0m"), "red")
+  assert.equal(stripAnsi("\x1b]8;;http://example\x07link\x1b]8;;\x07"), "link")
+  assert.equal(stripAnsi("plain text"), "plain text")
+})
+
+test("collapseRuns: a run >= minRun becomes one line plus a count marker", () => {
+  assert.equal(collapseRuns("a\na\na\nb\n", 3), "a  [ctx-guard: ×3]\nb\n")
+  // A pair is below minRun 3 and is left alone.
+  assert.equal(collapseRuns("a\na\nb\n", 3), "a\na\nb\n")
+  // Distinct lines are never collapsed.
+  assert.equal(collapseRuns("a\nb\nc\n", 3), "a\nb\nc\n")
+})
+
+test("log-compact select: below the threshold is untouched", () => {
+  const text = "x".repeat(LOG_COMPACT_OPTIONS.minChars)
+  assert.equal(logCompact.select(text), text)
+})
+
+test("log-compact select: strips ANSI and collapses a repeated run", () => {
+  const text = `${"\x1b[33mWARN timed out\x1b[0m\n".repeat(300)}done`
+  const out = logCompact.select(text)
+  assert.ok(!out.includes("\x1b"), "ANSI must be stripped")
+  assert.match(out, /WARN timed out {2}\[ctx-guard: ×300\]/)
+  assert.ok(out.endsWith("done"))
+})
+
+test("log-compact select: many distinct lines fall back to the head-tail bound", () => {
+  const text = Array.from(
+    { length: 600 },
+    (_, i) => `distinct line number ${i} ${"p".repeat(30)}`,
+  ).join("\n")
+  assert.match(logCompact.select(text), /\[ctx-guard: \d+ chars omitted\]/)
+})
+
+test("log-compact select: retained lines are verbatim", () => {
+  const text = `${"the quick brown fox\n".repeat(300)}tail`
+  const out = logCompact.select(text)
+  assert.ok(out.startsWith("the quick brown fox  [ctx-guard: ×300]"))
+  assert.ok(out.endsWith("tail"))
+})
+
+test("compressLog: bounds a still-oversized result with the fallback", () => {
+  const text = Array.from({ length: 400 }, (_, i) => `line ${i} ${"z".repeat(30)}`).join("\n")
+  const out = compressLog(text, {
+    minChars: 0,
+    minRun: 3,
+    fallback: { minChars: 0, headChars: 20, tailChars: 10 },
+  })
+  assert.match(out, /chars omitted/)
 })
