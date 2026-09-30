@@ -23,15 +23,14 @@ window.
 This is the whole point of the plugin. It is enforced by review, not by the
 compiler.
 
-## Status: Phase 3 (structural report) + savings ledger
-
-> **Current config (2026-09-30):** head+tail compression is **OFF**
-> (`COMPRESSION_ENABLED = false`) while the tool-output quality harness is built;
-> duplicate suppression stays **ON** (`DEDUP_ENABLED = true`). See "Measuring
-> effects".
+## Status: Phase 3 (structural report) + runtime config switch
 
 Implemented (server side):
 
+- **Runtime config switch** — compression and dedup are toggled at runtime and
+  persist in `ctx.storage` (session override → global override → default). The
+  agent toggles via the `ctxguard_config` tool; a human via `/ctx-guard`. See
+  "Runtime config" below. Defaults: compression **OFF**, dedup **ON**.
 - **Compaction injection** — `ctx.session.hook("compaction")` pushes a
   mode-aware continuity block (agent mode, current task, last command, recent
   decisions, active files, last occupancy reading) into the compaction system
@@ -45,11 +44,10 @@ Implemented (server side):
 - **Tool-output compression** — `ctx.tool.hook("execute.after")` replaces an
   oversized `shell`/`bash` result with `head + "… [ctx-guard: N chars omitted] …"
   + tail` before it is committed. Defaults: 4000-char threshold, 1600 head,
-  1200 tail. **Currently disabled** (`COMPRESSION_ENABLED = false`, 2026-09-30).
+  1200 tail.
 - **Duplicate suppression** — a repeated identical large result (> 1000 chars,
   same tool + arguments) collapses to a marker. The per-session signature ring
-  lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16
-  (`DEDUP_ENABLED`).
+  lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16.
 - **Savings ledger** — every compression/dedup event folds its exact char delta
   into a per-session tally in `ctx.storage` under `session:<id>:savings`. This is
   the measurement surface (see "Measuring effects").
@@ -60,13 +58,30 @@ Implemented (server side):
 
 Not yet implemented: RPC + `token_status` (Phase 4), CLI plugin (Phase 5).
 
+## Runtime config
+
+Compression and dedup are runtime-toggleable and persist in `ctx.storage`
+(the `kv` table in `opencode.db`), so they survive reloads and restarts.
+Precedence: **session override → global override → default**
+(compression OFF, dedup ON).
+
+- **Agent:** call the `ctxguard_config` tool — `{ compression?, dedup?, session?, reset? }`.
+  Set `session: true` to scope a change to the current session only (e.g. while
+  doing critical work). It returns the resulting effective config.
+- **Human:** run `/ctx-guard compression off`, `/ctx-guard dedup on`,
+  `/ctx-guard reset [session]`. (V2 commands cannot return output, so this
+  applies silently; confirm via the `ctxguard_config` tool.)
+- **Read path:** `execute.after` reads the effective config fresh each call, so
+  a toggle takes effect on the next tool call — no hot reload needed.
+
 
 ## Layout
 
 ```
 server/
-  index.ts              plugin entry: { id, setup } + hook wiring
+  index.ts              plugin entry: { id, setup } + hook wiring + tool/command
   lib/compaction.ts     buildContinuityBlock (pure)
+  lib/config.ts         runtime compression/dedup switch (persisted) + resolver
   lib/quality.ts        token estimate + occupancy (pure)
   lib/storage.ts        per-session continuity + savings (ctx.storage)
   lib/toolhooks.ts      compression + dedup + signatures + savings ledger (pure)
