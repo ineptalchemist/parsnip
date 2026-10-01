@@ -9,6 +9,7 @@
     "test:bench": "node --test 'bench/**/*.test.ts'",
     "bench": "node bench/run.ts",
     "compare": "node bench/compare.ts",
+    "eval": "node bench/eval.ts",
     "savings": "node bench/read-savings.ts"
   },
   "devDependencies": {

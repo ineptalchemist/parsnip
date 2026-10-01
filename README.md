@@ -124,7 +124,10 @@ bench/
   run.ts                offline ceiling benchmark (npm run bench)
   corpus.ts             curated 8-item corpus, one per differentiating axis (compare)
   compare.ts            cross-selector comparison: ratio + fidelity/fragment proxies
+  eval.ts               known-answer eval: planted-fact recovery per selector (npm run eval)
+  facts.ts              eval corpus: realistic outputs + planted facts
   lib/proxies.ts        pure proxies: signal/identifier/novel retention + fragments
+  lib/recovery.ts       pure known-answer recovery scoring
   read-savings.ts       dump per-session tokens + char savings from opencode.db
 ```
 
@@ -147,6 +150,7 @@ npm test            # node --test 'server/**/*.test.ts' (Node strips types; no b
 npm run test:bench  # node --test 'bench/**/*.test.ts' (proxy + fragment tests)
 npm run bench       # offline ceiling benchmark (compression + dedup)
 npm run compare     # per-selector ratio + fidelity/fragment proxies over the corpus
+npm run eval        # known-answer recovery of planted facts, per selector
 npm run savings     # dump per-session savings ledgers from opencode.db (read-only)
 ```
 
@@ -201,6 +205,18 @@ Two ledgers are recorded per session, and they measure different things.
    being the no-boundary fallback case only. The proxies compare *visible* text
    (ANSI stripped, so `log-compact`'s ANSI strip is not scored as lost
    content); ratios and token counts stay on the raw bytes.
+6. **Known-answer recovery (offline, deterministic):** `npm run eval` plants
+   distinctive facts (errors, `file:line`s, hashes, URLs, values, identifiers) at
+   head/middle/tail positions in realistic outputs and scores **literal fact
+   recovery** per selector. Headline — middle-band (the region the head-tail
+   baseline drops) recovery across the corpus: `head-tail` **0%**,
+   `token-budget` 0%, `log-compact` 0%, `signal-preserving` **20%**,
+   `extractive` **93%** — at a comparable or better ratio. Items sit in the
+   live-valid window (over the 4000-char gate, under the native caps), so this is
+   what compression does live on few-line-but-long output. Caveat: the planted
+   facts are *distinctive* (novel-shaped) lines — what `extractive` targets and
+   what task-relevant content usually looks like; a non-distinctive-fact stress
+   case is a follow-up.
 
 `npm run savings` prints both live ledgers. It reads `opencode.db` directly
 because plugin `console.log`/`console.error` does *not* reach `opencode.log`.
