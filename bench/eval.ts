@@ -8,14 +8,22 @@
  *
  * Recovery is exact (selectors are faithful subsets). Bands are relative to the
  * head-tail baseline cut: `head`/`tail` are what the baseline keeps verbatim,
- * `middle` is what it drops — the headline number. Every corpus item sits in the
- * live-valid window (over the 4000-char gate, under the native caps), so these
- * are the few-line-but-long outputs where compression actually fires live.
+ * `middle` is what it drops. Each fact is also tagged `distinctive` (novel-shaped
+ * line) or `plain` (a value inside a shape-repetitive line) — the split that
+ * bounds what literal heuristics can do.
+ *
+ * If a Laya relevance map exists (`laya.json`, produced by the out-of-process
+ * scratch probe — see `bench/lib/laya.ts`), a `laya` arm is added: it keeps
+ * head + tail plus the middle lines Laya judged relevant, so the model-graded
+ * approach is measured next to the literal selectors. Absent the map, the eval
+ * runs unchanged.
  */
 
+import { existsSync, readFileSync } from "node:fs"
 import { FACT_CORPUS } from "./facts.ts"
 import { SELECTOR_NAMES, SELECTORS } from "../server/lib/selectors.ts"
-import { BANDS, FACT_LABELS, pct, recover, recovery } from "./lib/recovery.ts"
+import { BANDS, FACT_LABELS, pct, recover, recovery, type CorpusItem } from "./lib/recovery.ts"
+import { layaSelect, parseRelevance, type Relevance } from "./lib/laya.ts"
 
 type Col = { title: string; width: number; align: "left" | "right" }
 type Kept = { kept: number; total: number }
@@ -55,7 +63,35 @@ const add = (acc: Map<string, Kept>, key: string, kept: number, total: number): 
   acc.set(key, { kept: cur.kept + kept, total: cur.total + total })
 }
 
+/** One compression arm: a literal selector, or the Laya-scored selector. */
+type Arm = { name: string; select: (item: CorpusItem) => string }
+
+const LAYA_PATH =
+  process.argv[2] ?? process.env.CTXGUARD_LAYA_JSON ?? "/tmp/opencode/laya-eval/laya.json"
+
+function loadRelevance(): Relevance | null {
+  if (!existsSync(LAYA_PATH)) return null
+  try {
+    return parseRelevance(JSON.parse(readFileSync(LAYA_PATH, "utf8")))
+  } catch {
+    return null
+  }
+}
+
 function main(): void {
+  const relevance = loadRelevance()
+  const arms: Arm[] = SELECTOR_NAMES.map((name) => ({
+    name,
+    select: (item) => SELECTORS[name].select(item.text),
+  }))
+  if (relevance) {
+    arms.push({
+      name: "laya",
+      select: (item) =>
+        layaSelect(item.text, relevance.items[item.name]?.p ?? [], relevance.threshold),
+    })
+  }
+
   const totalFacts = FACT_CORPUS.reduce((n, item) => n + item.facts.length, 0)
   const bandCounts = BANDS.map((band) => {
     const n = FACT_CORPUS.reduce((acc, item) => acc + item.facts.filter((f) => f.band === band).length, 0)
@@ -64,33 +100,38 @@ function main(): void {
 
   console.log("ctx-guard known-answer eval")
   console.log(`corpus: ${FACT_CORPUS.length} items, ${totalFacts} planted facts (${bandCounts.join(" / ")})`)
-  console.log(`selectors: ${SELECTOR_NAMES.join(", ")}`)
+  console.log(`arms: ${arms.map((a) => a.name).join(", ")}`)
+  console.log(
+    relevance
+      ? `laya map: ${LAYA_PATH} (threshold ${relevance.threshold})`
+      : `no laya map at ${LAYA_PATH} — run the scratch probe to add a 'laya' arm`,
+  )
   console.log("recov = planted facts whose exact bytes survive; band = position vs the head-tail baseline cut")
 
-  // Per-selector aggregates across all items.
   const midDistinctTotals = new Map<string, Kept>()
   const midPlainTotals = new Map<string, Kept>()
   const labelTotals = new Map<string, Map<string, Kept>>()
 
   for (const item of FACT_CORPUS) {
     console.log(`\n### ${item.name}  (${item.facts.length} facts)`)
-    const rows = SELECTOR_NAMES.map((selector) => {
-      const output = SELECTORS[selector].select(item.text)
+    const rows = arms.map((arm) => {
+      const output = arm.select(item)
       const r = recovery(output, item.facts)
 
       const midDistinct = item.facts.filter((f) => f.band === "middle" && f.distinctive !== false)
       const midPlain = item.facts.filter((f) => f.band === "middle" && f.distinctive === false)
-      add(midDistinctTotals, selector, recover(output, midDistinct), midDistinct.length)
-      add(midPlainTotals, selector, recover(output, midPlain), midPlain.length)
-      const byLabel = labelTotals.get(selector) ?? new Map<string, Kept>()
+      add(midDistinctTotals, arm.name, recover(output, midDistinct), midDistinct.length)
+      add(midPlainTotals, arm.name, recover(output, midPlain), midPlain.length)
+
+      const byLabel = labelTotals.get(arm.name) ?? new Map<string, Kept>()
       for (const label of FACT_LABELS) {
         const b = r.byLabel[label]
         add(byLabel, label, b.kept, b.total)
       }
-      labelTotals.set(selector, byLabel)
+      labelTotals.set(arm.name, byLabel)
 
       return [
-        selector,
+        arm.name,
         (output.length / item.text.length).toFixed(3),
         fmtPct(pct(r.kept, r.total)),
         fmtPct(pct(r.byBand.head.kept, r.byBand.head.total)),
@@ -104,10 +145,10 @@ function main(): void {
   console.log("\n### labels (across items)")
   render(
     LABEL_COLUMNS,
-    SELECTOR_NAMES.map((selector) => {
-      const byLabel = labelTotals.get(selector)
+    arms.map((arm) => {
+      const byLabel = labelTotals.get(arm.name)
       return [
-        selector,
+        arm.name,
         ...FACT_LABELS.map((label) => {
           const k = byLabel?.get(label) ?? { kept: 0, total: 0 }
           return fmtPct(pct(k.kept, k.total))
@@ -117,16 +158,16 @@ function main(): void {
   )
 
   console.log("\n### headline — middle-band recovery (across items)")
-  printHeadline("distinctive (novel-shaped lines)", midDistinctTotals)
-  printHeadline("plain (values in shape-repetitive lines)", midPlainTotals)
+  printHeadline(arms, "distinctive (novel-shaped lines)", midDistinctTotals)
+  printHeadline(arms, "plain (values in shape-repetitive lines)", midPlainTotals)
 }
 
 /** One middle-band headline block, for one distinctiveness class. */
-function printHeadline(title: string, totals: Map<string, Kept>): void {
+function printHeadline(arms: Arm[], title: string, totals: Map<string, Kept>): void {
   console.log(`  ${title}:`)
-  for (const selector of SELECTOR_NAMES) {
-    const m = totals.get(selector) ?? { kept: 0, total: 0 }
-    console.log(`    ${selector.padEnd(18)} ${fmtPct(pct(m.kept, m.total))}  (${m.kept}/${m.total})`)
+  for (const arm of arms) {
+    const m = totals.get(arm.name) ?? { kept: 0, total: 0 }
+    console.log(`    ${arm.name.padEnd(18)} ${fmtPct(pct(m.kept, m.total))}  (${m.kept}/${m.total})`)
   }
 }
 

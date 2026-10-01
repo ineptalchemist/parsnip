@@ -42,6 +42,7 @@ function buildLog(): CorpusItem {
   ]
   return {
     name: "build log (buried failure)",
+    task: "Which test failed, and at what file and line?",
     text: join(head, middle, tail),
     facts: [
       { text: "v2.14.3", label: "value", band: "head" },
@@ -74,6 +75,7 @@ function stackTrace(): CorpusItem {
   ]
   return {
     name: "python stack trace",
+    task: "What error was raised, and where in the code?",
     text: join(head, middle, tail),
     facts: [
       { text: '"src/main.py", line 12', label: "file:line", band: "head" },
@@ -109,6 +111,7 @@ function gitDiff(): CorpusItem {
   ]
   return {
     name: "git diff (rename hunks)",
+    task: "What code changed — which symbols were renamed and what values were added?",
     text: join(head, middle, tail),
     facts: [
       { text: DIFF_HASH_A, label: "hash", band: "head" },
@@ -136,6 +139,7 @@ function apiResponse(): CorpusItem {
   const suffix = `"docs":"${API_URL}"}`
   return {
     name: "minified JSON (one line)",
+    task: "What is the request id, the checksum, and the docs URL?",
     text: prefix + mid + body + suffix,
     facts: [
       { text: "req_7f3a2b9c", label: "value", band: "head" },
@@ -163,6 +167,7 @@ function dependencyList(): CorpusItem {
   ]
   return {
     name: "dependency list",
+    task: "Which versions are pinned for requests, parse_queries, sqlalchemy, and urllib3?",
     text: join(head, middle, tail),
     facts: [
       { text: "requests@2.31.0", label: "value", band: "head" },
@@ -193,6 +198,7 @@ function timestampedLog(): CorpusItem {
   ]
   return {
     name: "timestamped log (near-duplicate lines)",
+    task: "What error occurred, and which request id was processed?",
     text: join(head, middle, tail),
     facts: [
       { text: "worker_id=4412", label: "value", band: "head" },

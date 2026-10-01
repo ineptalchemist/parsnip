@@ -36,7 +36,13 @@ export type Fact = {
   distinctive?: boolean
 }
 
-export type CorpusItem = { name: string; text: string; facts: Fact[] }
+export type CorpusItem = {
+  name: string
+  /** The task/query the facts matter to — Laya judges relevance against this. */
+  task: string
+  text: string
+  facts: Fact[]
+}
 
 export const FACT_LABELS: readonly FactLabel[] = [
   "error",

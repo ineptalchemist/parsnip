@@ -10,6 +10,7 @@
     "bench": "node bench/run.ts",
     "compare": "node bench/compare.ts",
     "eval": "node bench/eval.ts",
+    "eval:export": "node bench/export-facts.ts",
     "savings": "node bench/read-savings.ts"
   },
   "devDependencies": {

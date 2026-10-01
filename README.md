@@ -126,8 +126,10 @@ bench/
   compare.ts            cross-selector comparison: ratio + fidelity/fragment proxies
   eval.ts               known-answer eval: planted-fact recovery per selector (npm run eval)
   facts.ts              eval corpus: realistic outputs + planted facts
+  export-facts.ts       dump the fact corpus to JSON for the Laya probe (npm run eval:export)
   lib/proxies.ts        pure proxies: signal/identifier/novel retention + fragments
   lib/recovery.ts       pure known-answer recovery scoring
+  lib/laya.ts           pure Laya-scored selection (consumes a relevance map; no dependency)
   read-savings.ts       dump per-session tokens + char savings from opencode.db
 ```
 
@@ -151,6 +153,7 @@ npm run test:bench  # node --test 'bench/**/*.test.ts' (proxy + fragment tests)
 npm run bench       # offline ceiling benchmark (compression + dedup)
 npm run compare     # per-selector ratio + fidelity/fragment proxies over the corpus
 npm run eval        # known-answer recovery of planted facts, per selector
+npm run eval:export # dump the fact corpus to JSON for the out-of-process Laya probe
 npm run savings     # dump per-session savings ledgers from opencode.db (read-only)
 ```
 
@@ -218,6 +221,16 @@ Two ledgers are recorded per session, and they measure different things.
    Items sit in the live-valid window (over the 4000-char gate, under the native
    caps), so this is what compression does live on few-line-but-long output. The
    plain result is the concrete motivation for a model-graded tier (deferred).
+7. **Model-graded tier, offline (optional):** given a Laya relevance map
+   (`laya.json`, produced by a scratch Python probe over `npm run eval:export`
+   output — Laya is out-of-process; no dependency), `npm run eval` adds a `laya`
+   arm that keeps head + tail plus the middle lines Laya judged relevant.
+   **Result (2026-10-01): Laya adds nothing here.** At its calibrated threshold it
+   recovers 20% distinctive / 0% plain middle facts (no better than
+   `signal-preserving`), and its per-line ranking is bimodal — some fact lines
+   rank #1, but entire categories rank last (all three git-diff facts #91-93/93;
+   plain facts mid-to-low). Laya itself warns the checkpoint's temperatures are
+   uncalibrated. Details in Basic Memory.
 
 `npm run savings` prints both live ledgers. It reads `opencode.db` directly
 because plugin `console.log`/`console.error` does *not* reach `opencode.log`.
