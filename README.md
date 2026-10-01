@@ -75,6 +75,13 @@ Implemented (server side):
   of the input / output / dropped region, and a 120-char sample of what was
   dropped. This is how context loss can be attributed to a specific method (see
   "Measuring effects").
+- **Recall cache** — compression is lossy to the *prompt* but lossless to the
+  *system*: the full pre-compression text of every dropped result is kept in a
+  bounded `session:<id>:recall` store (256 KB / 32 entries, oldest evicted), and
+  the compressed output gains a recall note naming the id (plus the dropped-region
+  sample). The agent retrieves it with the `ctxguard_recall` tool; a human with
+  `/ctx-guard recall <id>`. This is the backstop for the fact that no selector —
+  literal or model — can know a priori what matters (see the salience eval).
 - **Real token usage** — the plugin subscribes to `session.usage.updated` and
   writes the session's cumulative usage to `session:<id>:usage` (`input`,
   `output`, `reasoning`, `cache.read`, `cache.write`, `cost`). This is the

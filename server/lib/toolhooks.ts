@@ -499,3 +499,102 @@ export async function saveRecentCompressions(
     bounded as unknown as Parameters<StorageDomain["set"]>[1],
   )
 }
+
+// --- Recall cache (per-session dropped-text store) ---------------------------
+//
+// Compression is lossy to the *prompt* but must be lossless to the *system*:
+// every byte ctx-guard drops is kept here, keyed by a short recall id surfaced in
+// the omission marker, so the agent (via the `ctxguard_recall` tool) or a human
+// (via `/ctx-guard recall`) can get the full text back. Bounded by total bytes and
+// entry count; oldest evicted first. This is the backstop for the fact that no
+// selector — literal or model — can know a priori what matters.
+
+/** Max bytes of dropped text retained per session. */
+export const RECALL_BYTE_LIMIT = 256 * 1024
+/** Max recall entries retained per session. */
+export const RECALL_MEMORY = 32
+
+export type RecallEntry = {
+  /** Short handle surfaced in the omission marker (`recall-<n>`). */
+  id: string
+  tool: string
+  at: number
+  inputChars: number
+  /** FNV-1a of the full text, for correlation with the fidelity ledger. */
+  inputHash: string
+  /** First `OMITTED_SAMPLE_CHARS` of the dropped region, for the marker. */
+  sample: string
+  /** The FULL pre-compression text — lossless by construction. */
+  text: string
+}
+
+/** The whole store: a monotonic counter (ids never reused) + the bounded ring. */
+export type RecallState = { seq: number; entries: RecallEntry[] }
+
+export const recallKey = (sessionID: string): string => `session:${sessionID}:recall`
+
+/** Narrow untrusted stored JSON to a `RecallState`. */
+export function asRecallState(value: unknown): RecallState {
+  if (value == null || typeof value !== "object") return { seq: 0, entries: [] }
+  const record = value as Record<string, unknown>
+  const seq = typeof record.seq === "number" && record.seq >= 0 ? Math.floor(record.seq) : 0
+  const raw = Array.isArray(record.entries) ? record.entries : []
+  const entries = raw.filter((entry): entry is RecallEntry => {
+    if (!entry || typeof entry !== "object") return false
+    const e = entry as Record<string, unknown>
+    return typeof e.id === "string" && typeof e.text === "string"
+  })
+  return { seq, entries }
+}
+
+export async function loadRecall(storage: StorageDomain, sessionID: string): Promise<RecallState> {
+  return asRecallState(await storage.get(recallKey(sessionID)))
+}
+
+/** Trim to the byte/entry bounds (oldest first) and persist; `seq` is preserved. */
+export async function saveRecall(
+  storage: StorageDomain,
+  sessionID: string,
+  state: RecallState,
+): Promise<void> {
+  let entries = state.entries.slice(-RECALL_MEMORY)
+  let bytes = entries.reduce((n, e) => n + e.text.length, 0)
+  while (entries.length > 0 && bytes > RECALL_BYTE_LIMIT) {
+    bytes -= entries[0].text.length
+    entries = entries.slice(1)
+  }
+  const bounded: RecallState = { seq: state.seq, entries }
+  await storage.set(
+    recallKey(sessionID),
+    bounded as unknown as Parameters<StorageDomain["set"]>[1],
+  )
+}
+
+/** The marker appended to a compressed result so its dropped text is recoverable. */
+export function recallNote(id: string, sample: string): string {
+  return `[ctx-guard: full text dropped — recall ctxguard_recall("${id}") — dropped region starts: "${sample}"]`
+}
+
+/**
+ * Append `suffix` to the *last* text part (or a string content), leaving file
+ * parts and structured `output`/`metadata` alone. Used to hang the recall note
+ * off a compressed result without touching the selectors' own markers.
+ */
+export function appendResultText<T extends ToolResultLike>(result: T, suffix: string): T {
+  if (result == null || typeof result !== "object") return result
+  const content = result.content
+
+  if (typeof content === "string") return { ...result, content: content + suffix } as T
+  if (!Array.isArray(content)) return result
+
+  let last = -1
+  content.forEach((part, i) => {
+    if (textOfPart(part) !== undefined) last = i
+  })
+  if (last < 0) return result
+
+  const parts = content.slice()
+  const text = textOfPart(content[last]) as string
+  parts[last] = { ...(content[last] as Record<string, unknown>), text: text + suffix }
+  return { ...result, content: parts } as T
+}

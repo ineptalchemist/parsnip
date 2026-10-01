@@ -71,18 +71,23 @@ import {
   DEDUP_MIN_CHARS,
   addCompression,
   addDedup,
+  appendResultText,
   commandOf,
   compressResult,
   compressionEvent,
   dedupSignature,
   isTargetTool,
+  loadRecall,
   loadRecentCompressions,
   loadRecentSignatures,
+  recallNote,
   replaceResultText,
   resultTextOf,
+  saveRecall,
   saveRecentCompressions,
   saveRecentSignatures,
   textLengthOf,
+  type RecallEntry,
 } from "./lib/toolhooks.ts"
 import { SELECTOR_NAMES, isSelectorName, selectWith } from "./lib/selectors.ts"
 
@@ -390,6 +395,42 @@ function configTool(ctx: Plugin.Context) {
   }
 }
 
+const RECALL_TOOL_NAME = "ctxguard_recall"
+
+/**
+ * Agent-facing recall, added to the tool catalog via `ctx.tool.transform`.
+ * Compression is lossy to the prompt but lossless here: the omission marker in a
+ * compressed result names a recall id, and this returns the full dropped text.
+ */
+function recallTool(ctx: Plugin.Context) {
+  return {
+    name: RECALL_TOOL_NAME,
+    description:
+      "Retrieve the full text ctx-guard dropped when it compressed an oversized " +
+      "tool result. Compression is lossy to the prompt but lossless here: the " +
+      "omission marker names a recall id — pass it to get the original bytes back. " +
+      "Use when a compressed result looks like it may be missing something you need.",
+    input: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Recall id from the omission marker, e.g. recall-3." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    execute: async (rawInput: unknown, toolContext: { sessionID: string }) => {
+      const input = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>
+      const id = typeof input.id === "string" ? input.id.trim() : ""
+      const state = await loadRecall(ctx.storage, toolContext.sessionID)
+      const entry = state.entries.find((e) => e.id === id)
+      const text = entry
+        ? `ctx-guard recall ${id} — ${entry.inputChars} chars, tool ${entry.tool}:\n\n${entry.text}`
+        : `ctx-guard: no cached text for ${id || "(no id given)"} — it may have been evicted, or the id is wrong.`
+      return { content: [{ type: "text", text }] }
+    },
+  }
+}
+
 /**
  * Human-facing toggle: `/ctx-guard compression off`, `/ctx-guard dedup on
  * session`, `/ctx-guard reset`. A V2 command cannot return output, so this
@@ -401,13 +442,27 @@ function configCommand(ctx: Plugin.Context) {
     description:
       "View or change ctx-guard compression/dedup/selector: `/ctx-guard compression off`, " +
       "`/ctx-guard dedup on`, `/ctx-guard selector head-tail`, " +
-      "`/ctx-guard reset [session]`. Add `session` to scope to this session only.",
+      "`/ctx-guard reset [session]`. Add `session` to scope to this session only. " +
+      "`/ctx-guard recall <id>` looks up the full text a compression dropped (the " +
+      "agent-facing path is the `ctxguard_recall` tool).",
     execute: async (invocation: { sessionID: string; prompt: unknown }) => {
       const tokens = promptText(invocation.prompt).trim().toLowerCase().split(/\s+/).filter(Boolean)
       if (tokens.length === 0) return
 
       const scope: ConfigScope = tokens.includes("session") ? "session" : "global"
       const words = tokens.filter((token) => token !== "session")
+
+      if (words[0] === "recall") {
+        const id = words[1]
+        const state = await loadRecall(ctx.storage, invocation.sessionID)
+        const entry = state.entries.find((e) => e.id === id)
+        // A V2 command cannot return output; log the outcome for the operator
+        // (the `ctxguard_recall` tool is the agent-facing retrieval path).
+        console.error(
+          `[ctx-guard] recall ${id ?? "(no id)"}: ${entry ? `${entry.text.length} chars` : "not found"}`,
+        )
+        return
+      }
 
       if (words[0] === "reset") {
         await applyConfigPatch(ctx.storage, invocation.sessionID, {}, { scope, reset: true })
@@ -509,6 +564,7 @@ const ctxGuard: Plugin.Plugin = {
       ctx.tool.transform(
         guarded("tool.transform", (editor: ToolEditor) => {
           editor.add(configTool(ctx))
+          editor.add(recallTool(ctx))
         }),
       ),
     )
@@ -695,13 +751,38 @@ const ctxGuard: Plugin.Plugin = {
                 )
                 // Fidelity signal: fingerprint what this method dropped, so an
                 // external eval can attribute context loss to a selector.
+                const fidelity = compressionEvent({
+                  selector,
+                  tool: event.tool,
+                  input: beforeText,
+                  output: afterText,
+                })
                 const recent = await loadRecentCompressions(ctx.storage, event.sessionID)
-                await saveRecentCompressions(ctx.storage, event.sessionID, [
-                  ...recent,
-                  compressionEvent({ selector, tool: event.tool, input: beforeText, output: afterText }),
-                ])
+                await saveRecentCompressions(ctx.storage, event.sessionID, [...recent, fidelity])
+
+                // Recall cache: keep the FULL dropped text retrievable, and hang a
+                // recall note off the compressed result so the agent can get it back.
+                // This is the backstop for the fact that no selector can know a
+                // priori what matters (see the salience eval).
+                const recall = await loadRecall(ctx.storage, event.sessionID)
+                const recallId = `recall-${recall.seq + 1}`
+                const entry: RecallEntry = {
+                  id: recallId,
+                  tool: event.tool,
+                  at: fidelity.at,
+                  inputChars: beforeText.length,
+                  inputHash: fidelity.inputHash,
+                  sample: fidelity.omittedSample,
+                  text: beforeText,
+                }
+                await saveRecall(ctx.storage, event.sessionID, {
+                  seq: recall.seq + 1,
+                  entries: [...recall.entries, entry],
+                })
+                event.result = appendResultText(event.result, `\n${recallNote(recallId, entry.sample)}`)
+
                 console.error(
-                  `[ctx-guard] savings session=${event.sessionID} selector=${selector} event=compress chars=${omitted}`,
+                  `[ctx-guard] savings session=${event.sessionID} selector=${selector} event=compress chars=${omitted} recall=${recallId}`,
                 )
               }
             }

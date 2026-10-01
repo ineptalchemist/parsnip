@@ -328,9 +328,10 @@ test("execute.after: compresses a large shell result when enabled via config", a
 
   const text = (event.result.content as Array<AnyRecord>)[0].text
   assert.match(text, /\[ctx-guard: \d+ chars omitted\]/)
-  assert.ok(text.length < 3000, `expected a bounded placeholder, got ${text.length} chars`)
+  assert.match(text, /ctxguard_recall\("recall-\d+"\)/, "the recall note is appended")
+  assert.ok(text.length < 3200, `expected a bounded placeholder, got ${text.length} chars`)
   assert.equal(text.slice(0, 1600), "x".repeat(1600))
-  assert.ok(text.endsWith("x".repeat(1200)))
+  assert.ok(text.includes("x".repeat(1200)), "the tail survives (before the recall note)")
   assert.equal(event.result.output, outputRef, "structured output must be untouched")
 })
 
@@ -744,15 +745,17 @@ function commandCollector() {
   return { added, editor: { add: (definition: AnyRecord) => void added.push(definition) } }
 }
 
-test("setup registers a config tool and a config command", async () => {
+test("setup registers the config + recall tools and a config command", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
   const { added, editor } = collectorEditor()
   h.toolTransforms[0](editor)
-  assert.equal(added.length, 1)
-  assert.equal(added[0].name, "ctxguard_config")
-  assert.equal(typeof added[0].execute, "function")
+  assert.deepEqual(
+    added.map((t) => t.name).sort(),
+    ["ctxguard_config", "ctxguard_recall"],
+  )
+  for (const tool of added) assert.equal(typeof tool.execute, "function")
 
   const commands = commandCollector()
   h.commandTransforms[0](commands.editor)
@@ -879,5 +882,54 @@ test("execute.after: no fidelity event when compression is off", async () => {
 
   await h.hooks["execute.after"](toolEvent())
   assert.equal(h.store.has("session:ses_test:compressions"), false)
+})
+
+// --- recall cache -----------------------------------------------------------
+
+test("execute.after: a compression stores the full dropped text and appends a recall note", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+
+  const event = toolEvent()
+  await h.hooks["execute.after"](event)
+
+  const text = (event.result.content as Array<AnyRecord>)[0].text
+  const match = text.match(/ctxguard_recall\("(recall-\d+)"\)/)
+  assert.ok(match, "recall note present in the compressed output")
+
+  const state = h.store.get("session:ses_test:recall") as AnyRecord
+  assert.equal(state.seq, 1)
+  assert.equal(state.entries.length, 1)
+  assert.equal(state.entries[0].id, match[1])
+  assert.equal(state.entries[0].inputChars, 6000)
+  assert.equal(state.entries[0].text, "x".repeat(6000), "the FULL pre-compression text is stored")
+})
+
+test("ctxguard_recall: returns the stored text, or a not-found note", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+  await h.hooks["execute.after"](toolEvent())
+
+  const tools = collectorEditor()
+  h.toolTransforms[0](tools.editor)
+  const recall = tools.added.find((t) => t.name === "ctxguard_recall")
+  assert.ok(recall, "recall tool registered")
+
+  const found = await recall.execute({ id: "recall-1" }, { sessionID: "ses_test" })
+  assert.match(found.content[0].text, /ctx-guard recall recall-1/)
+  assert.ok(found.content[0].text.includes("x".repeat(6000)), "returns the full text")
+
+  const missing = await recall.execute({ id: "recall-999" }, { sessionID: "ses_test" })
+  assert.match(missing.content[0].text, /no cached text/)
+})
+
+test("execute.after: no recall entry when compression is off", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.after"](toolEvent())
+  assert.equal(h.store.has("session:ses_test:recall"), false)
 })
 

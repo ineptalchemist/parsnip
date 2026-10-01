@@ -30,6 +30,14 @@ import {
   stableJson,
   textLengthOf,
   toolHistoryKey,
+  RECALL_BYTE_LIMIT,
+  RECALL_MEMORY,
+  appendResultText,
+  asRecallState,
+  loadRecall,
+  recallKey,
+  recallNote,
+  saveRecall,
 } from "./toolhooks.ts"
 
 const OPTS = { minChars: 100, headChars: 20, tailChars: 10 }
@@ -435,4 +443,90 @@ test("compression events: round-trip through storage, capped at the memory size"
 
   // A different session has its own ring.
   assert.deepEqual(await loadRecentCompressions(storage, "ses_2"), [])
+})
+
+// --- recall cache -----------------------------------------------------------
+
+const memStorage = () => {
+  const store = new Map<string, unknown>()
+  return {
+    storage: {
+      get: async (key: string) => store.get(key),
+      set: async (key: string, value: unknown) => void store.set(key, value),
+    } as unknown as StorageDomain,
+    store,
+  }
+}
+
+const recallEntry = (n: number, bytes: number) => ({
+  id: `recall-${n}`,
+  tool: "shell",
+  at: n,
+  inputChars: bytes,
+  inputHash: "h",
+  sample: "s",
+  text: "x".repeat(bytes),
+})
+
+test("asRecallState: narrows stored JSON, tolerating junk", () => {
+  assert.deepEqual(asRecallState(undefined), { seq: 0, entries: [] })
+  const good = recallEntry(1, 4)
+  assert.deepEqual(asRecallState({ seq: 3, entries: [good, { id: "nope" }] }), {
+    seq: 3,
+    entries: [good],
+  })
+  assert.equal(asRecallState({ seq: -1, entries: "no" }).seq, 0)
+})
+
+test("recall: round-trips, keeps seq, and is bounded by entries and bytes", async () => {
+  const { storage, store } = memStorage()
+  assert.deepEqual(await loadRecall(storage, "ses_1"), { seq: 0, entries: [] })
+
+  // Entry cap.
+  await saveRecall(storage, "ses_1", {
+    seq: 40,
+    entries: Array.from({ length: RECALL_MEMORY + 5 }, (_, i) => recallEntry(i, 1)),
+  })
+  let state = await loadRecall(storage, "ses_1")
+  assert.equal(state.entries.length, RECALL_MEMORY)
+  assert.equal(state.seq, 40) // seq is preserved through trimming
+  assert.equal(state.entries.at(-1)?.id, `recall-${RECALL_MEMORY + 4}`)
+
+  // Byte cap: the oldest entries are evicted until under the limit.
+  const big = Math.ceil(RECALL_BYTE_LIMIT / 4) + 10
+  await saveRecall(storage, "ses_2", {
+    seq: 5,
+    entries: [1, 2, 3, 4, 5].map((n) => recallEntry(n, big)),
+  })
+  state = await loadRecall(storage, "ses_2")
+  const bytes = state.entries.reduce((n, e) => n + e.text.length, 0)
+  assert.ok(bytes <= RECALL_BYTE_LIMIT, `kept ${bytes} bytes`)
+  assert.equal(state.entries.at(-1)?.id, "recall-5") // newest kept
+  assert.ok(!state.entries.some((e) => e.id === "recall-1")) // oldest evicted
+  assert.ok(store.has(recallKey("ses_2")))
+})
+
+test("recallNote: names the id and the dropped-region sample", () => {
+  assert.equal(
+    recallNote("recall-7", "ERROR: boom"),
+    '[ctx-guard: full text dropped — recall ctxguard_recall("recall-7") — dropped region starts: "ERROR: boom"]',
+  )
+})
+
+test("appendResultText: appends to the last text part, leaving output/metadata alone", () => {
+  const output = { exit: 0 }
+  const withString = appendResultText({ content: "hi", output }, "\nNOTE")
+  assert.equal(withString.content, "hi\nNOTE")
+  assert.equal((withString as { output: unknown }).output, output)
+
+  const parts = [
+    { type: "text", text: "a" },
+    { type: "file", uri: "u", mime: "m" },
+    { type: "text", text: "b" },
+  ]
+  const appended = appendResultText({ content: parts }, "\nNOTE")
+  const out = appended.content as Array<Record<string, unknown>>
+  assert.equal(out[0].text, "a", "not the last text part")
+  assert.equal(out[1].type, "file", "file parts untouched")
+  assert.equal(out[2].text, "b\nNOTE", "the last text part gets the suffix")
 })
