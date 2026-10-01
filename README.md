@@ -206,17 +206,18 @@ Two ledgers are recorded per session, and they measure different things.
    (ANSI stripped, so `log-compact`'s ANSI strip is not scored as lost
    content); ratios and token counts stay on the raw bytes.
 6. **Known-answer recovery (offline, deterministic):** `npm run eval` plants
-   distinctive facts (errors, `file:line`s, hashes, URLs, values, identifiers) at
+   facts (errors, `file:line`s, hashes, URLs, values, identifiers) at
    head/middle/tail positions in realistic outputs and scores **literal fact
-   recovery** per selector. Headline — middle-band (the region the head-tail
-   baseline drops) recovery across the corpus: `head-tail` **0%**,
-   `token-budget` 0%, `log-compact` 0%, `signal-preserving` **20%**,
-   `extractive` **93%** — at a comparable or better ratio. Items sit in the
-   live-valid window (over the 4000-char gate, under the native caps), so this is
-   what compression does live on few-line-but-long output. Caveat: the planted
-   facts are *distinctive* (novel-shaped) lines — what `extractive` targets and
-   what task-relevant content usually looks like; a non-distinctive-fact stress
-   case is a follow-up.
+   recovery** per selector, split by distinctiveness. Headline — middle-band
+   recovery across the corpus:
+   - **distinctive** (novel-shaped lines): `head-tail` **0%**, `token-budget` 0%,
+     `log-compact` 0%, `signal-preserving` **20%**, `extractive` **93%** — at a
+     comparable or better ratio.
+   - **plain** (a value inside a shape-repetitive line): **0% for every
+     selector** — no heuristic can rescue a non-distinctive middle value.
+   Items sit in the live-valid window (over the 4000-char gate, under the native
+   caps), so this is what compression does live on few-line-but-long output. The
+   plain result is the concrete motivation for a model-graded tier (deferred).
 
 `npm run savings` prints both live ledgers. It reads `opencode.db` directly
 because plugin `console.log`/`console.error` does *not* reach `opencode.log`.

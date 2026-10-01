@@ -50,6 +50,7 @@ function buildLog(): CorpusItem {
       { text: "ERROR: tests failed at src/core_test.ts:142:7", label: "error", band: "middle" },
       { text: "src/parser.rs:27:11", label: "file:line", band: "middle" },
       { text: "assertion mismatch: expected 4096 got 3998", label: "value", band: "middle" },
+      { text: "compiling unit 55", label: "value", band: "middle", distinctive: false },
       { text: BUILD_URL, label: "url", band: "tail" },
     ],
   }
@@ -167,6 +168,7 @@ function dependencyList(): CorpusItem {
       { text: "requests@2.31.0", label: "value", band: "head" },
       { text: "parse_queries@1.4.2", label: "identifier", band: "middle" },
       { text: "sqlalchemy@2.0.30", label: "value", band: "middle" },
+      { text: "package_42@42.2.42", label: "value", band: "middle", distinctive: false },
       { text: "urllib3@2.2.1", label: "value", band: "tail" },
     ],
   }
@@ -196,6 +198,7 @@ function timestampedLog(): CorpusItem {
       { text: "worker_id=4412", label: "value", band: "head" },
       { text: "ERROR: timeout after 5000ms calling upstream", label: "error", band: "middle" },
       { text: "REQ-ID=8f3a2b9c", label: "value", band: "middle" },
+      { text: "task 77 done", label: "value", band: "middle", distinctive: false },
       {
         text: "https://status.example.com/incidents/2026-09-30",
         label: "url",

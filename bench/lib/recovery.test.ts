@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { HEAD_CHARS, TAIL_CHARS } from "../../server/lib/selectors.ts"
+import { HEAD_CHARS, TAIL_CHARS, lineShape } from "../../server/lib/selectors.ts"
 import { FACT_CORPUS } from "../facts.ts"
 import {
   BANDS,
@@ -59,6 +59,36 @@ test("corpus: declared bands match bandOf", () => {
         `${item.name}: band mismatch for ${fact.text}`,
       )
     }
+  }
+})
+
+test("corpus: declared distinctiveness matches the line shape count", () => {
+  for (const item of FACT_CORPUS) {
+    const lines = item.text.split("\n")
+    const shapeCounts = new Map<string, number>()
+    for (const line of lines) {
+      const shape = lineShape(line)
+      shapeCounts.set(shape, (shapeCounts.get(shape) ?? 0) + 1)
+    }
+    for (const fact of item.facts) {
+      const line = lines.find((l) => l.includes(fact.text))
+      assert.ok(line, `${item.name}: no line contains ${fact.text}`)
+      const count = shapeCounts.get(lineShape(line as string)) ?? 0
+      const declared = fact.distinctive !== false
+      assert.equal(
+        count === 1,
+        declared,
+        `${item.name}: distinctiveness mismatch for ${fact.text} (shape count ${count})`,
+      )
+    }
+  }
+})
+
+test("corpus: plain facts exist in the middle band", () => {
+  const plain = FACT_CORPUS.flatMap((item) => item.facts.filter((f) => f.distinctive === false))
+  assert.ok(plain.length >= 3, "expected at least three plain facts")
+  for (const fact of plain) {
+    assert.equal(fact.band, "middle", `plain fact must be in the middle band: ${fact.text}`)
   }
 })
 

@@ -28,6 +28,12 @@ export type Fact = {
   label: FactLabel
   /** Position relative to the head-tail baseline cut (validated, not computed). */
   band: Band
+  /**
+   * Whether the fact's *line* has a unique digit-masked shape (`lineShape`).
+   * Default `true`. `false` = "plain": a specific value inside a line whose shape
+   * recurs — invisible to novelty-based selection. Validated, not computed.
+   */
+  distinctive?: boolean
 }
 
 export type CorpusItem = { name: string; text: string; facts: Fact[] }

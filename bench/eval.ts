@@ -15,7 +15,7 @@
 
 import { FACT_CORPUS } from "./facts.ts"
 import { SELECTOR_NAMES, SELECTORS } from "../server/lib/selectors.ts"
-import { BANDS, FACT_LABELS, pct, recovery } from "./lib/recovery.ts"
+import { BANDS, FACT_LABELS, pct, recover, recovery } from "./lib/recovery.ts"
 
 type Col = { title: string; width: number; align: "left" | "right" }
 type Kept = { kept: number; total: number }
@@ -68,7 +68,8 @@ function main(): void {
   console.log("recov = planted facts whose exact bytes survive; band = position vs the head-tail baseline cut")
 
   // Per-selector aggregates across all items.
-  const middleTotals = new Map<string, Kept>()
+  const midDistinctTotals = new Map<string, Kept>()
+  const midPlainTotals = new Map<string, Kept>()
   const labelTotals = new Map<string, Map<string, Kept>>()
 
   for (const item of FACT_CORPUS) {
@@ -77,7 +78,10 @@ function main(): void {
       const output = SELECTORS[selector].select(item.text)
       const r = recovery(output, item.facts)
 
-      add(middleTotals, selector, r.byBand.middle.kept, r.byBand.middle.total)
+      const midDistinct = item.facts.filter((f) => f.band === "middle" && f.distinctive !== false)
+      const midPlain = item.facts.filter((f) => f.band === "middle" && f.distinctive === false)
+      add(midDistinctTotals, selector, recover(output, midDistinct), midDistinct.length)
+      add(midPlainTotals, selector, recover(output, midPlain), midPlain.length)
       const byLabel = labelTotals.get(selector) ?? new Map<string, Kept>()
       for (const label of FACT_LABELS) {
         const b = r.byLabel[label]
@@ -113,9 +117,16 @@ function main(): void {
   )
 
   console.log("\n### headline — middle-band recovery (across items)")
+  printHeadline("distinctive (novel-shaped lines)", midDistinctTotals)
+  printHeadline("plain (values in shape-repetitive lines)", midPlainTotals)
+}
+
+/** One middle-band headline block, for one distinctiveness class. */
+function printHeadline(title: string, totals: Map<string, Kept>): void {
+  console.log(`  ${title}:`)
   for (const selector of SELECTOR_NAMES) {
-    const m = middleTotals.get(selector) ?? { kept: 0, total: 0 }
-    console.log(`  ${selector.padEnd(18)} ${fmtPct(pct(m.kept, m.total))}  (${m.kept}/${m.total})`)
+    const m = totals.get(selector) ?? { kept: 0, total: 0 }
+    console.log(`    ${selector.padEnd(18)} ${fmtPct(pct(m.kept, m.total))}  (${m.kept}/${m.total})`)
   }
 }
 
