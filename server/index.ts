@@ -74,6 +74,7 @@ import {
   commandOf,
   compressResult,
   compressionEvent,
+  dedupSignature,
   isTargetTool,
   loadRecentCompressions,
   loadRecentSignatures,
@@ -81,7 +82,6 @@ import {
   resultTextOf,
   saveRecentCompressions,
   saveRecentSignatures,
-  signatureOf,
   textLengthOf,
 } from "./lib/toolhooks.ts"
 import { SELECTOR_NAMES, isSelectorName, selectWith } from "./lib/selectors.ts"
@@ -649,7 +649,7 @@ const ctxGuard: Plugin.Plugin = {
           // Dedup first: a repeated large result collapses to a marker, and is
           // not re-added to the history (it is already there).
           if (config.dedup && text > DEDUP_MIN_CHARS) {
-            const signature = signatureOf(event.tool, event.input)
+            const signature = dedupSignature(event.tool, event.input, resultTextOf(event.result))
             const recent = await loadRecentSignatures(ctx.storage, event.sessionID)
             if (recent.includes(signature)) {
               event.result = replaceResultText(event.result, DEDUP_MARKER)

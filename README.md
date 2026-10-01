@@ -58,9 +58,14 @@ Implemented (server side):
   lead + tail plus the highest-scoring middle lines (position + length + signal).
   Swapping the selector — via `ctxguard_config` or `/ctx-guard selector <name>` —
   changes the method without touching the hook.
-- **Duplicate suppression** — a repeated identical large result (> 1000 chars,
-  same tool + arguments) collapses to a marker. The per-session signature ring
-  lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16.
+- **Duplicate suppression** — a repeated **byte-identical** large result
+  (> 1000 chars) collapses to a marker. The signature is content-addressed —
+  `tool + args + FNV-1a(output)` — so a re-run whose *output changed* never
+  matches (a re-read of a mutable file, a re-run whose log differs). Applies to
+  shell (`bash`/`shell`) and to search/retrieval tools (`websearch`,
+  `parallel_web_search`/`web_fetch`, `firecrawl_search`/`scrape`); state-query
+  tools (`read`, `grep`) are deliberately excluded. The per-session signature
+  ring lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16.
 - **Savings ledger** — every compression/dedup event folds its exact char delta
   into a per-session tally in `ctx.storage` under `session:<id>:savings`. This is
   the measurement surface (see "Measuring effects").

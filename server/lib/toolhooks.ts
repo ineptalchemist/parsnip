@@ -47,7 +47,26 @@ export const DEDUP_MIN_CHARS = 1000
 export const DEDUP_MEMORY = 16
 
 /** Confirmed live on 2.0.19 in step 2.1: the shell tool is `shell`. */
-export const TARGET_TOOLS: readonly string[] = ["bash", "shell"]
+export const SHELL_TOOLS: readonly string[] = ["bash", "shell"]
+
+/**
+ * Search / retrieval tools whose large results are subject to dedup (and, when
+ * compression is enabled, compression). Matched as case-insensitive substrings,
+ * so MCP prefixes/namespaces still match (`parallel_web_search`,
+ * `firecrawl.firecrawl_search`, …). Content-hash keying (see `dedupSignature`)
+ * makes collapsing their repeats safe: a re-fetch whose content changed simply
+ * does not match.
+ */
+export const SEARCH_TOOLS: readonly string[] = [
+  "websearch",
+  "web_search",
+  "web_fetch",
+  "firecrawl_search",
+  "firecrawl_scrape",
+]
+
+/** Every tool whose result the plugin may rewrite in `execute.after`. */
+export const TARGET_TOOLS: readonly string[] = [...SHELL_TOOLS, ...SEARCH_TOOLS]
 
 export const DEDUP_MARKER =
   "[ctx-guard: duplicate output suppressed — same command ran recently]"
@@ -275,6 +294,17 @@ function textOfPart(part: unknown): string | undefined {
 /** Stable signature for a (tool, input) pair; key order cannot cause a miss. */
 export function signatureOf(tool: string, input: unknown): string {
   return `${tool}:${stableJson(input)}`
+}
+
+/**
+ * Content-addressed dedup signature: the args-keyed `signatureOf` plus a
+ * fingerprint of the *output* text. Folding the content in means a re-run whose
+ * output changed never matches, so only byte-identical repeats collapse. The
+ * args-only form would hide a changed result (a re-read of a file that changed,
+ * a re-run whose log differs), which is exactly the freshness hazard.
+ */
+export function dedupSignature(tool: string, input: unknown, text: string): string {
+  return `${signatureOf(tool, input)}:${fnv1a(text)}`
 }
 
 const MAX_SIGNATURE_DEPTH = 6

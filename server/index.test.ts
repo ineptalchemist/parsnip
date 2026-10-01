@@ -405,6 +405,62 @@ test("execute.after: dedup savings are recorded; compression is off by default",
   assert.equal(savings.charsDeduped, 6000 - DEDUP_MARKER.length)
 })
 
+test("execute.after: a re-run with changed output is NOT suppressed (content-hash dedup)", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.after"](toolEvent()) // first: baseline content
+
+  const changed = toolEvent({
+    result: {
+      content: [{ type: "text", text: `${"x".repeat(6000)}changed` }],
+      output: { exit: 0 },
+      metadata: {},
+    },
+  })
+  await h.hooks["execute.after"](changed)
+
+  // Same command, changed bytes: it must pass through, never collapse to a marker.
+  assert.equal((changed.result.content as Array<AnyRecord>)[0].text, `${"x".repeat(6000)}changed`)
+})
+
+test("execute.after: the dedup ring is capped at DEDUP_MEMORY", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  // 17 distinct large results evict the first from the 16-entry ring.
+  for (let i = 0; i < 17; i += 1) {
+    await h.hooks["execute.after"](toolEvent({ input: { command: `printf ${i}` } }))
+  }
+  const history = h.store.get("session:ses_test:toolHistory") as string[]
+  assert.equal(history.length, 16)
+
+  // Re-running command 0 is now a miss: it passes through.
+  const replay = toolEvent({ input: { command: "printf 0" } })
+  await h.hooks["execute.after"](replay)
+  assert.equal((replay.result.content as Array<AnyRecord>)[0].text, "x".repeat(6000))
+})
+
+test("execute.after: a repeated identical large search result is suppressed", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const search = () =>
+    toolEvent({
+      tool: "parallel_web_search",
+      input: { objective: "find x", search_queries: ["x"] },
+      result: { content: [{ type: "text", text: "r".repeat(5000) }] },
+    })
+
+  const first = search()
+  await h.hooks["execute.after"](first)
+  assert.equal((first.result.content as Array<AnyRecord>)[0].text, "r".repeat(5000))
+
+  const second = search()
+  await h.hooks["execute.after"](second)
+  assert.equal((second.result.content as Array<AnyRecord>)[0].text, DEDUP_MARKER)
+})
+
 test("execute.after: compression savings are recorded when enabled", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)

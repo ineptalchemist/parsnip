@@ -13,6 +13,7 @@ import {
   compressText,
   compressionsKey,
   compressionEvent,
+  dedupSignature,
   emptySavings,
   fnv1a,
   isTargetTool,
@@ -36,14 +37,25 @@ const select = (text: string) => compressText(text, OPTS)
 
 // --- isTargetTool -----------------------------------------------------------
 
-test("isTargetTool: matches shell/bash case-insensitively, rejects others", () => {
+test("isTargetTool: matches shell/bash and search tools, rejects state-query tools", () => {
+  // shell
   assert.equal(isTargetTool("shell"), true)
   assert.equal(isTargetTool("SHELL"), true)
   assert.equal(isTargetTool("bash"), true)
   assert.equal(isTargetTool("shellcheck"), true)
+  // search / retrieval (case-insensitive substring, namespace-robust)
+  assert.equal(isTargetTool("parallel_web_search"), true)
+  assert.equal(isTargetTool("parallel.web_search"), true)
+  assert.equal(isTargetTool("websearch"), true)
+  assert.equal(isTargetTool("firecrawl_search"), true)
+  assert.equal(isTargetTool("firecrawl.firecrawl_search"), true)
+  assert.equal(isTargetTool("parallel_web_fetch"), true)
+  // not targeted: state-query tools keep their freshness
   assert.equal(isTargetTool("read"), false)
+  assert.equal(isTargetTool("read_file"), false)
+  assert.equal(isTargetTool("grep"), false)
   assert.equal(isTargetTool("write"), false)
-  assert.equal(isTargetTool("parallel_web_search"), false)
+  assert.equal(isTargetTool("glob"), false)
 })
 
 // --- shouldCompress / compressText -----------------------------------------
@@ -171,6 +183,27 @@ test("signatureOf: identical inputs match, key order is irrelevant, args differ"
   assert.equal(a, b)
   assert.notEqual(a, c)
   assert.notEqual(a, d)
+})
+
+test("dedupSignature: identical (tool, input, output) match; changed output differs", () => {
+  const input = { command: "ls -la", cwd: "/tmp" }
+  // Key order in the input is irrelevant (inherited from signatureOf).
+  assert.equal(
+    dedupSignature("shell", input, "same bytes"),
+    dedupSignature("shell", { cwd: "/tmp", command: "ls -la" }, "same bytes"),
+  )
+  // Changed output → different signature (the whole point: no stale collapse).
+  assert.notEqual(
+    dedupSignature("shell", input, "same bytes"),
+    dedupSignature("shell", input, "same bytes!"),
+  )
+  // Different tool → different signature.
+  assert.notEqual(
+    dedupSignature("shell", input, "same bytes"),
+    dedupSignature("bash", input, "same bytes"),
+  )
+  // Shape: starts with the args-keyed signature + an 8-hex content hash.
+  assert.match(dedupSignature("shell", input, "same bytes"), /^shell:\{.*\}:[0-9a-f]{8}$/)
 })
 
 test("stableJson: sorts nested keys, handles arrays and primitive edge cases", () => {
