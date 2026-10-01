@@ -117,6 +117,9 @@ server/
   *.test.ts             node:test suites (no framework)
 bench/
   run.ts                offline ceiling benchmark (npm run bench)
+  corpus.ts             curated 8-item corpus, one per differentiating axis (compare)
+  compare.ts            cross-selector comparison: ratio + fidelity/fragment proxies
+  lib/proxies.ts        pure proxies: signal/identifier/novel retention + fragments
   read-savings.ts       dump per-session tokens + char savings from opencode.db
 ```
 
@@ -135,9 +138,11 @@ the directory is touched — no service restart required.
 ## Development
 
 ```bash
-npm test          # node --test 'server/**/*.test.ts' (Node strips types; no build step)
-npm run bench     # offline ceiling benchmark (compression + dedup)
-npm run savings   # dump per-session savings ledgers from opencode.db (read-only)
+npm test            # node --test 'server/**/*.test.ts' (Node strips types; no build step)
+npm run test:bench  # node --test 'bench/**/*.test.ts' (proxy + fragment tests)
+npm run bench       # offline ceiling benchmark (compression + dedup)
+npm run compare     # per-selector ratio + fidelity/fragment proxies over the corpus
+npm run savings     # dump per-session savings ledgers from opencode.db (read-only)
 ```
 
 - Zero runtime dependencies. The only `devDependency` is `@opencode/plugin`
@@ -179,6 +184,18 @@ Two ledgers are recorded per session, and they measure different things.
 4. **Mechanism ceiling (offline, deterministic):** `npm run bench` pushes a
    realistic shell-output corpus through the pure `compressText` / dedup
    functions — a ~95% ceiling on the sample corpus.
+5. **Selector comparison + fidelity proxies (offline, deterministic):**
+   `npm run compare` pushes the curated corpus (`bench/corpus.ts`) through all
+   five selectors and reports, per selector: ratio, uncalibrated ~tokens, four
+   content-retention proxies — signal lines, identifiers, novel lines (exact
+   and shape) — and a **fragment count** (identifiers the output emits cut
+   mid-token; lower is better, 0 = every emitted identifier is whole).
+   Retention cannot separate `head-tail` from `token-budget` — both keep the
+   same char budget and a cut fragment never counts as retained — while the
+   fragment proxy can: **9 vs 2** fragments over the corpus, `token-budget`'s 2
+   being the no-boundary fallback case only. The proxies compare *visible* text
+   (ANSI stripped, so `log-compact`'s ANSI strip is not scored as lost
+   content); ratios and token counts stay on the raw bytes.
 
 `npm run savings` prints both live ledgers. It reads `opencode.db` directly
 because plugin `console.log`/`console.error` does *not* reach `opencode.log`.
