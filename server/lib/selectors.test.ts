@@ -2,6 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   COMPRESSION_OPTIONS,
+  EXTRACTIVE_OPTIONS,
   HEAD_CHARS,
   LOG_COMPACT_OPTIONS,
   MIN_CHARS,
@@ -12,20 +13,25 @@ import {
   TAIL_CHARS,
   TOKEN_BUDGET_OPTIONS,
   collapseRuns,
+  compressExtractive,
   compressLog,
   compressSignal,
   compressText,
   compressTokenBudget,
+  extractive,
   headTail,
   isSelectorName,
+  lineShape,
   logCompact,
   omissionMarker,
   resolveSelector,
+  scoreLine,
   selectWith,
   signalLines,
   signalPreserving,
   stripAnsi,
   tokenBudget,
+  truncateLine,
 } from "./selectors.ts"
 
 // --- registry ---------------------------------------------------------------
@@ -239,4 +245,93 @@ test("signal-preserving select: a giant one-liner falls back to a bounded char c
   const out = signalPreserving.select("x".repeat(8000))
   assert.match(out, /\[ctx-guard: \d+ chars omitted\]/)
   assert.ok(out.length < 3000, `expected a bounded result, got ${out.length}`)
+})
+
+// --- extractive selector ----------------------------------------------------
+
+test("truncateLine: trims above the cap with an ellipsis", () => {
+  assert.equal(truncateLine("abcdef", 10), "abcdef")
+  assert.equal(truncateLine("abcdefghij", 5), "abcd…")
+})
+
+test("scoreLine: signal outranks a plain line; the ends outrank the middle", () => {
+  const plain = "filler line with ordinary words"
+  const mid = scoreLine(plain, 50, 100, EXTRACTIVE_OPTIONS)
+  assert.ok(scoreLine(plain, 0, 100, EXTRACTIVE_OPTIONS) > mid, "head must outrank the middle")
+  assert.ok(
+    scoreLine("ERROR: boom", 50, 100, EXTRACTIVE_OPTIONS) > mid,
+    "a signal line must outrank a plain line at the same position",
+  )
+})
+
+test("extractive select: below the threshold is untouched", () => {
+  const text = "x".repeat(EXTRACTIVE_OPTIONS.minChars)
+  assert.equal(extractive.select(text), text)
+})
+
+test("extractive select: few long lines fall back to the head-tail bound", () => {
+  const text = Array.from({ length: 10 }, (_, i) => `line ${i} ${"q".repeat(495)}`).join("\n")
+  assert.match(extractive.select(text), /chars omitted/)
+})
+
+test("extractive select: keeps lead + tail and rescues the best middle line", () => {
+  const lines = [
+    "FIRST LINE",
+    "second line",
+    "third line",
+    ...Array.from({ length: 200 }, (_, i) => `filler ${i} ${"f".repeat(30)}`),
+    "penultimate",
+    "last-1",
+    "LAST LINE",
+  ]
+  lines[3 + 100] = "ERROR: unique diagnostic marker at src/bar.ts:9:9"
+  const out = extractive.select(lines.join("\n"))
+
+  assert.ok(out.startsWith("FIRST LINE\nsecond line\nthird line\n"))
+  assert.ok(out.endsWith("penultimate\nlast-1\nLAST LINE"))
+  assert.match(out, /kept \d+ of \d+ middle lines/)
+  assert.ok(
+    out.includes("ERROR: unique diagnostic marker"),
+    "the diagnostic middle line must be kept",
+  )
+})
+
+test("extractive select: retained lines are verbatim", () => {
+  const lines = [
+    "alpha first",
+    "beta second",
+    "gamma third",
+    ...Array.from({ length: 200 }, (_, i) => `filler ${i} ${"f".repeat(30)}`),
+    "delta penult",
+    "epsilon last",
+    "zeta final",
+  ]
+  const text = lines.join("\n")
+  const out = extractive.select(text)
+
+  for (const line of out.split("\n")) {
+    if (line === "" || line.startsWith("… [ctx-guard:")) continue
+    assert.ok(text.includes(line), `not verbatim: ${line}`)
+  }
+})
+
+test("lineShape: masks digits so near-duplicate lines collapse", () => {
+  assert.equal(lineShape("filler 0 fffff"), lineShape("filler 199 fffff"))
+  assert.notEqual(lineShape("filler 0 fffff"), lineShape("unique line"))
+})
+
+test("extractive select: a novel non-signal middle line outranks repetitive fillers", () => {
+  const lines = [
+    "FIRST LINE",
+    "second line",
+    "third line",
+    ...Array.from({ length: 200 }, (_, i) => `filler ${i} ${"f".repeat(30)}`),
+    "penultimate",
+    "last-1",
+    "LAST LINE",
+  ]
+  lines[3 + 100] = "UNIQUE-MIDDLE-VALUE this dense line matters"
+  const out = extractive.select(lines.join("\n"))
+
+  assert.ok(out.includes("UNIQUE-MIDDLE-VALUE"), "a novel middle line must be kept")
 })

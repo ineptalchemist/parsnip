@@ -310,6 +310,131 @@ export function compressSignal(text: string, o: SignalOptions): string {
   return `${head}\n${signalHeader}\n${keptText}\n${tailMarker}${tail}`
 }
 
+// --- Extractive summarization (for the extractive selector) ------------------
+//
+// Rank lines by a deterministic heuristic and keep the best ones: a fixed lead +
+// tail for framing, then the highest-scoring middle lines. Retained lines are
+// verbatim and stay in original order (score selects, never reorders).
+
+export type ExtractiveOptions = {
+  /** Results at or below this many chars are left untouched. */
+  minChars: number
+  /** Total lines kept (lead + ranked middle + tail). */
+  maxLines: number
+  /** Lines always kept from the start. */
+  leadLines: number
+  /** Lines always kept from the end. */
+  tailLines: number
+  /** Char budget for the ranked middle. */
+  maxChars: number
+  /** Max chars kept per line (longer lines are "…"-truncated). */
+  maxLineChars: number
+  /** Position decay: larger reaches further inward from the ends. */
+  leadBias: number
+  /** Score bonus for a line matching `SIGNAL_PATTERN`. */
+  signalWeight: number
+  /** Score bonus for a line whose shape is unique (scaled by 1 / shape count). */
+  noveltyWeight: number
+}
+
+export const EXTRACTIVE_OPTIONS: ExtractiveOptions = {
+  minChars: MIN_CHARS,
+  maxLines: 40,
+  leadLines: 3,
+  tailLines: 3,
+  maxChars: 2000,
+  maxLineChars: 400,
+  leadBias: 5,
+  signalWeight: 2,
+  noveltyWeight: 1,
+}
+
+/** Trim a line to `max` chars, marking the cut with "…". */
+export function truncateLine(line: string, max: number): string {
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+/**
+ * A line's "shape": digits masked, so lines that differ only by a number
+ * (`filler 0 …` vs `filler 199 …`) collapse to one shape. Used to measure
+ * novelty — how rare a line is among its peers.
+ */
+export function lineShape(line: string): string {
+  return line.replace(/\d+/g, "#").trim()
+}
+
+/**
+ * Deterministic keep-score: end-of-text position bias + length band + signal +
+ * novelty. `shapeCount` is how many lines share this line's shape (1 = unique).
+ */
+export function scoreLine(
+  line: string,
+  index: number,
+  total: number,
+  o: ExtractiveOptions,
+  shapeCount = 1,
+): number {
+  const fromStart = index
+  const fromEnd = total - 1 - index
+  const position = Math.max(
+    1 / (1 + fromStart / o.leadBias),
+    1 / (1 + fromEnd / o.leadBias),
+  )
+  const length = line.length
+  const lengthScore = length < 20 ? 0.3 : length <= 200 ? 1 : 0.5
+  const signal = SIGNAL_PATTERN.test(line) ? o.signalWeight : 0
+  const novelty = o.noveltyWeight / Math.max(1, shapeCount)
+  return position + lengthScore + signal + novelty
+}
+
+/**
+ * Keep a fixed lead + tail and fill the remaining budget with the highest
+ * scoring middle lines, in original order. Faithful: retained lines are
+ * verbatim (or "…"-truncated); only `[ctx-guard: …]` markers are added.
+ */
+export function compressExtractive(text: string, o: ExtractiveOptions): string {
+  if (text.length <= o.minChars) return text
+  const lines = text.split("\n")
+  // Few lines: nothing to select away, and lead/tail would overlap — bound by
+  // chars instead (the giant-one-liner case).
+  if (lines.length <= o.maxLines) return compressText(text, COMPRESSION_OPTIONS)
+
+  const emit = (line: string): string => truncateLine(line, o.maxLineChars)
+  const lead = lines.slice(0, o.leadLines)
+  const tail = lines.slice(lines.length - o.tailLines)
+  const middle = lines.slice(o.leadLines, lines.length - o.tailLines)
+
+  const budget = Math.max(0, o.maxLines - lead.length - tail.length)
+  const shapes = new Map<string, number>()
+  const shapeOf = middle.map((line) => {
+    const shape = lineShape(line)
+    shapes.set(shape, (shapes.get(shape) ?? 0) + 1)
+    return shape
+  })
+  const ranked = middle
+    .map((line, index) => ({
+      line,
+      index,
+      score: scoreLine(line, index, middle.length, o, shapes.get(shapeOf[index]) ?? 1),
+    }))
+    .sort((a, b) => b.score - a.score)
+
+  const kept: Array<{ line: string; index: number }> = []
+  let chars = 0
+  for (const entry of ranked) {
+    if (kept.length >= budget) break
+    const cost = Math.min(entry.line.length, o.maxLineChars)
+    if (chars + cost > o.maxChars) continue
+    kept.push(entry)
+    chars += cost
+  }
+  kept.sort((a, b) => a.index - b.index)
+
+  const selected = kept.map((entry) => emit(entry.line))
+  const header = `… [ctx-guard: kept ${selected.length} of ${middle.length} middle lines] …`
+  return `${lead.map(emit).join("\n")}\n${header}\n${selected.join("\n")}\n${tail.map(emit).join("\n")}`
+}
+
 // --- Selector registry ------------------------------------------------------
 
 /**
@@ -317,7 +442,13 @@ export function compressSignal(text: string, o: SignalOptions): string {
  * lands; `SelectorName` is derived from it so the config surface and the
  * registry can never drift.
  */
-export const SELECTOR_NAMES = ["head-tail", "token-budget", "log-compact", "signal-preserving"] as const
+export const SELECTOR_NAMES = [
+  "head-tail",
+  "token-budget",
+  "log-compact",
+  "signal-preserving",
+  "extractive",
+] as const
 
 export type SelectorName = (typeof SELECTOR_NAMES)[number]
 
@@ -362,11 +493,21 @@ export const signalPreserving: CompressionSelector = {
   select: (text) => compressSignal(text, SIGNAL_OPTIONS),
 }
 
+/**
+ * General fidelity selector: a fixed lead + tail plus the highest-scoring middle
+ * lines (position + length + signal), in original order.
+ */
+export const extractive: CompressionSelector = {
+  id: "extractive",
+  select: (text) => compressExtractive(text, EXTRACTIVE_OPTIONS),
+}
+
 export const SELECTORS: Record<SelectorName, CompressionSelector> = {
   "head-tail": headTail,
   "token-budget": tokenBudget,
   "log-compact": logCompact,
   "signal-preserving": signalPreserving,
+  extractive: extractive,
 }
 
 export function isSelectorName(value: unknown): value is SelectorName {
