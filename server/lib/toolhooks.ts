@@ -510,9 +510,9 @@ export async function saveRecentCompressions(
 // selector — literal or model — can know a priori what matters.
 
 /** Max bytes of dropped text retained per session. */
-export const RECALL_BYTE_LIMIT = 256 * 1024
+export const RECALL_BYTE_LIMIT = 1024 * 1024
 /** Max recall entries retained per session. */
-export const RECALL_MEMORY = 32
+export const RECALL_MEMORY = 128
 
 export type RecallEntry = {
   /** Short handle surfaced in the omission marker (`recall-<n>`). */
@@ -597,4 +597,18 @@ export function appendResultText<T extends ToolResultLike>(result: T, suffix: st
   const text = textOfPart(content[last]) as string
   parts[last] = { ...(content[last] as Record<string, unknown>), text: text + suffix }
   return { ...result, content: parts } as T
+}
+
+// --- Per-session storage cleanup --------------------------------------------
+//
+// `ctx.storage` (OpenCode's `kv` table) has NO session foreign key / cascade, so
+// a plugin's `session:<id>:*` keys are orphaned forever when a session is
+// deleted. `pruneSession` removes them; the plugin calls it on `session.deleted`
+// so per-session storage is bounded by session lifetime.
+
+/** Remove every `session:<id>:*` key; returns how many were removed. */
+export async function pruneSession(storage: StorageDomain, sessionID: string): Promise<number> {
+  const { entries } = await storage.scan({ prefix: `session:${sessionID}:` })
+  for (const entry of entries) await storage.remove(entry.key)
+  return entries.length
 }

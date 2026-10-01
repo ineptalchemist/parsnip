@@ -37,6 +37,7 @@ import {
   loadRecall,
   recallKey,
   recallNote,
+  pruneSession,
   saveRecall,
 } from "./toolhooks.ts"
 
@@ -529,4 +530,27 @@ test("appendResultText: appends to the last text part, leaving output/metadata a
   assert.equal(out[0].text, "a", "not the last text part")
   assert.equal(out[1].type, "file", "file parts untouched")
   assert.equal(out[2].text, "b\nNOTE", "the last text part gets the suffix")
+})
+
+test("pruneSession: removes only the given session's keys", async () => {
+  const store = new Map<string, unknown>()
+  store.set("session:ses_a:recall", { seq: 1 })
+  store.set("session:ses_a:savings", { compressions: 1 })
+  store.set("session:ses_b:recall", { seq: 2 })
+  store.set("global:thing", 1)
+  const storage = {
+    scan: async ({ prefix }: { prefix: string }) => ({
+      entries: [...store.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([key, value]) => ({ key, value })),
+    }),
+    remove: async (key: string) => void store.delete(key),
+  } as unknown as StorageDomain
+
+  const removed = await pruneSession(storage, "ses_a")
+  assert.equal(removed, 2)
+  assert.equal(store.has("session:ses_a:recall"), false)
+  assert.equal(store.has("session:ses_a:savings"), false)
+  assert.equal(store.has("session:ses_b:recall"), true, "another session untouched")
+  assert.equal(store.has("global:thing"), true, "non-session keys untouched")
 })

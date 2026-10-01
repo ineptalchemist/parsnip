@@ -14,7 +14,8 @@ import { headTail } from "./lib/selectors.ts"
 
 type AnyRecord = Record<string, any>
 
-function makeHarness() {
+function makeHarness(options: { events?: AnyRecord[] } = {}) {
+  const subscribedEvents = options.events ?? []
   const hooks: AnyRecord = {}
   const transforms: Array<(editor: AnyRecord) => void> = []
   const mcpTransforms: Array<(editor: AnyRecord) => void> = []
@@ -81,7 +82,26 @@ function makeHarness() {
       get: async (key: string) => store.get(key),
       set: async (key: string, value: unknown) => void store.set(key, value),
       remove: async (key: string) => void store.delete(key),
-      scan: async () => ({ entries: [] }),
+      scan: async ({ prefix }: { prefix: string }) => ({
+        entries: [...store.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .map(([key, value]) => ({ key, value })),
+      }),
+    },
+    event: {
+      // Sync async-iterable over the seeded events, then done (matches the real
+      // `ctx.event.subscribe`, which the plugin iterates with `for await`).
+      subscribe: (_input?: unknown) => ({
+        [Symbol.asyncIterator]() {
+          let i = 0
+          return {
+            next: async () =>
+              i < subscribedEvents.length
+                ? { done: false, value: subscribedEvents[i++] }
+                : { done: true, value: undefined },
+          }
+        },
+      }),
     },
   }
 
@@ -931,5 +951,27 @@ test("execute.after: no recall entry when compression is off", async () => {
 
   await h.hooks["execute.after"](toolEvent())
   assert.equal(h.store.has("session:ses_test:recall"), false)
+})
+
+// --- session.deleted prune --------------------------------------------------
+
+/** Wait for a predicate, flushing macrotasks (the event loop runs async). */
+async function until(pred: () => boolean, steps = 100): Promise<boolean> {
+  for (let i = 0; i < steps && !pred(); i += 1) await new Promise((r) => setImmediate(r))
+  return pred()
+}
+
+test("session.deleted: prunes the deleted session's keys, leaving other sessions alone", async () => {
+  const h = makeHarness({ events: [{ type: "session.deleted", data: { sessionID: "ses_test" } }] })
+  h.store.set("session:ses_test:recall", { seq: 1, entries: [] })
+  h.store.set("session:ses_test:savings", { compressions: 1 })
+  h.store.set("session:other:recall", { seq: 1, entries: [] })
+
+  await ctxGuard.setup(h.ctx)
+
+  const pruned = await until(() => !h.store.has("session:ses_test:recall"))
+  assert.ok(pruned, "the deleted session's recall key was pruned")
+  assert.equal(h.store.has("session:ses_test:savings"), false, "all of the session's keys go")
+  assert.equal(h.store.has("session:other:recall"), true, "another session is untouched")
 })
 

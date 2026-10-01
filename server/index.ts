@@ -80,6 +80,7 @@ import {
   loadRecall,
   loadRecentCompressions,
   loadRecentSignatures,
+  pruneSession,
   recallNote,
   replaceResultText,
   resultTextOf,
@@ -805,6 +806,19 @@ const ctxGuard: Plugin.Plugin = {
       void (async () => {
         try {
           for await (const event of usageStream) {
+            // `ctx.storage` has no session cascade, so a plugin's per-session keys
+            // are orphaned forever when a session is deleted — prune them here.
+            if (event.type === "session.deleted") {
+              try {
+                const removed = await pruneSession(ctx.storage, event.data.sessionID)
+                console.error(
+                  `[ctx-guard] pruned ${removed} storage key(s) for deleted session ${event.data.sessionID}`,
+                )
+              } catch (error) {
+                console.error("[ctx-guard] session prune failed (ignored):", error)
+              }
+              continue
+            }
             if (event.type !== "session.usage.updated") continue
             try {
               await saveTokenUsage(
