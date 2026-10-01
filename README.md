@@ -211,29 +211,29 @@ Two ledgers are recorded per session, and they measure different things.
 6. **Known-answer recovery (offline, deterministic):** `npm run eval` plants
    facts (errors, `file:line`s, hashes, URLs, values, identifiers) at
    head/middle/tail positions in realistic outputs and scores **literal fact
-   recovery** per selector, split by distinctiveness. Headline — middle-band
-   recovery across the corpus:
-   - **distinctive** (novel-shaped lines): `head-tail` **0%**, `token-budget` 0%,
-     `log-compact` 0%, `signal-preserving` **20%**, `extractive` **93%** — at a
-     comparable or better ratio.
-   - **plain** (a value inside a shape-repetitive line): **0% for every
-     selector** — no heuristic can rescue a non-distinctive middle value.
-   Items sit in the live-valid window (over the 4000-char gate, under the native
-   caps), so this is what compression does live on few-line-but-long output. The
-   plain result is the concrete motivation for a model-graded tier (deferred).
+   recovery** per selector. **Caveat (2026-10-01) — the "distinctive" result is
+   circular:** those facts are *salient* (signal-shaped or `lineShape`-unique),
+   which is exactly what `signal-preserving`'s pattern and `extractive`'s
+   `novelty = 1/shapeCount` term target. So `extractive` **93%** vs `head-tail`
+   0% on the salient class measures the benchmark rewarding its own heuristic,
+   not general merit. The **plain** class (a value inside a shape-repetitive
+   line) is the only non-circular one — and there **every selector, including
+   `extractive`, scores 0%**. Net: `extractive` wins the salient class by
+   construction; **no** selector handles non-salient content. A per-salience-class
+   breakdown is planned.
 7. **Model-graded tier, offline (optional):** given a Laya relevance map
    (`laya.json`, produced by a scratch Python probe over `npm run eval:export`
    output — Laya is out-of-process; no dependency), `npm run eval` adds a `laya`
    arm that keeps head + tail plus the middle lines Laya judged relevant.
    **Result (2026-10-01).** Question framing is the lever: a vague `noul` scores
-   20% distinctive middle recovery, and a graded `score` rubric lifts it to
-   **53%** (the fine-tuned `typed-decisions` head gives 47%, no better) — but it
-   still trails `extractive` (93%), its per-line ranking stays
-   bimodal (all three git-diff facts #91-93/93), and it recovers **0% of plain
-   facts** like every literal selector. So the residual gap is the model, not the
-   arm. (The load warning about "uncalibrated temperatures" is the shipped
-   `choice:11+` bucket, which the `noul`/`score` questions don't use.) Details in
-   Basic Memory.
+   20% salient-class middle recovery, and a graded `score` rubric lifts it to
+   **53%** (the fine-tuned `typed-decisions` head gives 47%, no better). That
+   sits below `extractive`'s 93% **only on the salient class — a circular
+   comparison (see item 6)**; on the non-circular **plain** class Laya and
+   `extractive` are **tied at 0%**. Laya's per-line ranking stays bimodal
+   (git-diff facts #91-93/93). So the residual gap is the model, not the arm.
+   (The load warning about "uncalibrated temperatures" is the shipped `choice:11+`
+   bucket, which the `noul`/`score` questions don't use.) Details in Basic Memory.
 
 `npm run savings` prints both live ledgers. It reads `opencode.db` directly
 because plugin `console.log`/`console.error` does *not* reach `opencode.log`.
