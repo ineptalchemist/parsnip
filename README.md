@@ -227,7 +227,8 @@ Two ledgers are recorded per session, and they measure different things.
    arm that keeps head + tail plus the middle lines Laya judged relevant.
    **Result (2026-10-01).** Question framing is the lever: a vague `noul` scores
    20% distinctive middle recovery, and a graded `score` rubric lifts it to
-   **53%** — but it still trails `extractive` (93%), its per-line ranking stays
+   **53%** (the fine-tuned `typed-decisions` head gives 47%, no better) — but it
+   still trails `extractive` (93%), its per-line ranking stays
    bimodal (all three git-diff facts #91-93/93), and it recovers **0% of plain
    facts** like every literal selector. So the residual gap is the model, not the
    arm. (The load warning about "uncalibrated temperatures" is the shipped
