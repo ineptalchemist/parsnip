@@ -1,14 +1,18 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { HEAD_CHARS, TAIL_CHARS, lineShape } from "../../server/lib/selectors.ts"
+import { HEAD_CHARS, TAIL_CHARS } from "../../server/lib/selectors.ts"
 import { FACT_CORPUS } from "../facts.ts"
 import {
   BANDS,
   FACT_LABELS,
+  SALIENCES,
   bandOf,
+  lineContaining,
   pct,
   recover,
   recovery,
+  salienceOf,
+  shapeCount,
   type Fact,
 } from "./recovery.ts"
 
@@ -62,34 +66,37 @@ test("corpus: declared bands match bandOf", () => {
   }
 })
 
-test("corpus: declared distinctiveness matches the line shape count", () => {
-  for (const item of FACT_CORPUS) {
-    const lines = item.text.split("\n")
-    const shapeCounts = new Map<string, number>()
-    for (const line of lines) {
-      const shape = lineShape(line)
-      shapeCounts.set(shape, (shapeCounts.get(shape) ?? 0) + 1)
-    }
-    for (const fact of item.facts) {
-      const line = lines.find((l) => l.includes(fact.text))
-      assert.ok(line, `${item.name}: no line contains ${fact.text}`)
-      const count = shapeCounts.get(lineShape(line as string)) ?? 0
-      const declared = fact.distinctive !== false
-      assert.equal(
-        count === 1,
-        declared,
-        `${item.name}: distinctiveness mismatch for ${fact.text} (shape count ${count})`,
-      )
-    }
-  }
+test("lineContaining / shapeCount: find a fact's line and its shape frequency", () => {
+  const text = ["alpha", "beta #1", "beta #2", "gamma"].join("\n")
+  assert.equal(lineContaining(text, "#1"), "beta #1")
+  assert.equal(lineContaining(text, "nope"), "")
+  assert.equal(shapeCount(text, "beta #1"), 2) // "beta ##" shape ×2
+  assert.equal(shapeCount(text, "alpha"), 1)
 })
 
-test("corpus: plain facts exist in the middle band", () => {
-  const plain = FACT_CORPUS.flatMap((item) => item.facts.filter((f) => f.distinctive === false))
-  assert.ok(plain.length >= 3, "expected at least three plain facts")
-  for (const fact of plain) {
-    assert.equal(fact.band, "middle", `plain fact must be in the middle band: ${fact.text}`)
+test("salienceOf: positional > signal > shape-novel > value", () => {
+  const item = ["HEAD", "ERROR: boom", "UNIQUE novel line 42", "filler #1", "filler #2", "TAIL"].join("\n")
+  assert.equal(salienceOf({ text: "HEAD", label: "value", band: "head" }, item), "positional")
+  assert.equal(salienceOf({ text: "ERROR: boom", label: "error", band: "middle" }, item), "signal")
+  assert.equal(
+    salienceOf({ text: "UNIQUE novel line 42", label: "value", band: "middle" }, item),
+    "shape-novel",
+  )
+  assert.equal(salienceOf({ text: "filler #1", label: "value", band: "middle" }, item), "value")
+})
+
+test("corpus: every salience class is represented, with a real value sample", () => {
+  const counts: Record<string, number> = {}
+  for (const item of FACT_CORPUS) {
+    for (const fact of item.facts) {
+      const s = salienceOf(fact, item.text)
+      counts[s] = (counts[s] ?? 0) + 1
+    }
   }
+  for (const s of SALIENCES) {
+    assert.ok((counts[s] ?? 0) >= 2, `salience class ${s} has too few facts (${counts[s] ?? 0})`)
+  }
+  assert.ok((counts.value ?? 0) >= 5, `the hard 'value' class is too small (${counts.value ?? 0})`)
 })
 
 test("corpus: items sit in the live-valid window and cover all bands", () => {

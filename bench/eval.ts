@@ -22,7 +22,18 @@
 import { existsSync, readFileSync } from "node:fs"
 import { FACT_CORPUS } from "./facts.ts"
 import { SELECTOR_NAMES, SELECTORS } from "../server/lib/selectors.ts"
-import { BANDS, FACT_LABELS, pct, recover, recovery, type CorpusItem } from "./lib/recovery.ts"
+import {
+  BANDS,
+  FACT_LABELS,
+  SALIENCES,
+  pct,
+  recover,
+  recovery,
+  salienceOf,
+  type CorpusItem,
+  type Fact,
+  type Salience,
+} from "./lib/recovery.ts"
 import { layaSelect, parseRelevance, type Relevance } from "./lib/laya.ts"
 
 type Col = { title: string; width: number; align: "left" | "right" }
@@ -46,6 +57,14 @@ const LABEL_COLUMNS: Col[] = [
   { title: "value", width: 7, align: "right" },
   { title: "identifier", width: 11, align: "right" },
 ]
+
+/** One-line gloss per salience class, for the headline. */
+const SALIENCE_NOTE: Record<Salience, string> = {
+  positional: " (head/tail — kept by all; control)",
+  signal: " (SIGNAL_PATTERN — signal-preserving's turf)",
+  "shape-novel": " (lineShape unique — extractive's turf, by construction)",
+  value: " (no shallow feature — the hard class)",
+}
 
 const fmtPct = (value: number | null): string => (value === null ? "n/a" : `${value.toFixed(0)}%`)
 
@@ -108,20 +127,24 @@ function main(): void {
   )
   console.log("recov = planted facts whose exact bytes survive; band = position vs the head-tail baseline cut")
 
-  const midDistinctTotals = new Map<string, Kept>()
-  const midPlainTotals = new Map<string, Kept>()
+  const salienceTotals = new Map<Salience, Map<string, Kept>>()
+  for (const s of SALIENCES) salienceTotals.set(s, new Map())
   const labelTotals = new Map<string, Map<string, Kept>>()
 
   for (const item of FACT_CORPUS) {
+    const bySalience = new Map<Salience, Fact[]>()
+    for (const s of SALIENCES) bySalience.set(s, [])
+    for (const f of item.facts) bySalience.get(salienceOf(f, item.text))?.push(f)
+
     console.log(`\n### ${item.name}  (${item.facts.length} facts)`)
     const rows = arms.map((arm) => {
       const output = arm.select(item)
       const r = recovery(output, item.facts)
 
-      const midDistinct = item.facts.filter((f) => f.band === "middle" && f.distinctive !== false)
-      const midPlain = item.facts.filter((f) => f.band === "middle" && f.distinctive === false)
-      add(midDistinctTotals, arm.name, recover(output, midDistinct), midDistinct.length)
-      add(midPlainTotals, arm.name, recover(output, midPlain), midPlain.length)
+      for (const s of SALIENCES) {
+        const fs = bySalience.get(s) ?? []
+        add(salienceTotals.get(s) as Map<string, Kept>, arm.name, recover(output, fs), fs.length)
+      }
 
       const byLabel = labelTotals.get(arm.name) ?? new Map<string, Kept>()
       for (const label of FACT_LABELS) {
@@ -157,9 +180,10 @@ function main(): void {
     }),
   )
 
-  console.log("\n### headline — middle-band recovery (across items)")
-  printHeadline(arms, "distinctive (novel-shaped lines)", midDistinctTotals)
-  printHeadline(arms, "plain (values in shape-repetitive lines)", midPlainTotals)
+  console.log("\n### headline — recovery by salience class (positional = head/tail; others = middle)")
+  for (const s of SALIENCES) {
+    printHeadline(arms, `${s}${SALIENCE_NOTE[s]}`, salienceTotals.get(s) ?? new Map())
+  }
 }
 
 /** One middle-band headline block, for one distinctiveness class. */

@@ -17,7 +17,7 @@
  * is therefore correctly counted as lost.
  */
 
-import { HEAD_CHARS, TAIL_CHARS } from "../../server/lib/selectors.ts"
+import { HEAD_CHARS, SIGNAL_PATTERN, TAIL_CHARS, lineShape } from "../../server/lib/selectors.ts"
 
 export type FactLabel = "error" | "file:line" | "hash" | "url" | "value" | "identifier"
 export type Band = "head" | "middle" | "tail"
@@ -28,12 +28,6 @@ export type Fact = {
   label: FactLabel
   /** Position relative to the head-tail baseline cut (validated, not computed). */
   band: Band
-  /**
-   * Whether the fact's *line* has a unique digit-masked shape (`lineShape`).
-   * Default `true`. `false` = "plain": a specific value inside a line whose shape
-   * recurs — invisible to novelty-based selection. Validated, not computed.
-   */
-  distinctive?: boolean
 }
 
 export type CorpusItem = {
@@ -63,6 +57,49 @@ export function bandOf(text: string, input: string): Band {
   if (end <= HEAD_CHARS) return "head"
   if (i >= input.length - TAIL_CHARS) return "tail"
   return "middle"
+}
+
+// --- Salience ----------------------------------------------------------------
+//
+// The "salience class" is *which shallow feature a selector could use to find a
+// fact*. It is **computed**, not hand-tagged, so the classification is objective
+// and re-derivable — and it exposes the circularity the old `distinctive`
+// boolean hid: extractive is graded on `shape-novel` (its own `novelty` term),
+// signal-preserving on `signal` (its own pattern). The `value` class — no shallow
+// feature at all — is the only one that tests relevance.
+
+/** Precedence: positional > signal > shape-novel > value. */
+export type Salience = "positional" | "signal" | "shape-novel" | "value"
+
+export const SALIENCES: readonly Salience[] = ["positional", "signal", "shape-novel", "value"]
+
+/** The first line of `text` containing `fact`, or "" when absent. */
+export function lineContaining(text: string, fact: string): string {
+  for (const line of text.split("\n")) if (line.includes(fact)) return line
+  return ""
+}
+
+/** How many lines of `text` share the digit-masked `lineShape` of `line`. */
+export function shapeCount(text: string, line: string): number {
+  const shape = lineShape(line)
+  let n = 0
+  for (const l of text.split("\n")) if (lineShape(l) === shape) n += 1
+  return n
+}
+
+/**
+ * Classify a fact by the minimal feature a selector needs to keep it:
+ *  - `positional`  — in the head/tail (kept verbatim by every selector)
+ *  - `signal`      — its line matches `SIGNAL_PATTERN`
+ *  - `shape-novel` — its line's `lineShape` is unique (extractive's novelty turf)
+ *  - `value`       — none of the above: the hard class, no shallow feature
+ */
+export function salienceOf(fact: Fact, itemText: string): Salience {
+  if (fact.band !== "middle") return "positional"
+  const line = lineContaining(itemText, fact.text)
+  if (line && SIGNAL_PATTERN.test(line)) return "signal"
+  if (line && shapeCount(itemText, line) === 1) return "shape-novel"
+  return "value"
 }
 
 /** Number of `facts` whose text is present in `output`. */

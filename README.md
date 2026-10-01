@@ -208,19 +208,22 @@ Two ledgers are recorded per session, and they measure different things.
    being the no-boundary fallback case only. The proxies compare *visible* text
    (ANSI stripped, so `log-compact`'s ANSI strip is not scored as lost
    content); ratios and token counts stay on the raw bytes.
-6. **Known-answer recovery (offline, deterministic):** `npm run eval` plants
-   facts (errors, `file:line`s, hashes, URLs, values, identifiers) at
-   head/middle/tail positions in realistic outputs and scores **literal fact
-   recovery** per selector. **Caveat (2026-10-01) — the "distinctive" result is
-   circular:** those facts are *salient* (signal-shaped or `lineShape`-unique),
-   which is exactly what `signal-preserving`'s pattern and `extractive`'s
-   `novelty = 1/shapeCount` term target. So `extractive` **93%** vs `head-tail`
-   0% on the salient class measures the benchmark rewarding its own heuristic,
-   not general merit. The **plain** class (a value inside a shape-repetitive
-   line) is the only non-circular one — and there **every selector, including
-   `extractive`, scores 0%**. Net: `extractive` wins the salient class by
-   construction; **no** selector handles non-salient content. A per-salience-class
-   breakdown is planned.
+6. **Known-answer recovery, by salience class (offline, deterministic):**
+   `npm run eval` plants facts in realistic outputs and scores **literal
+   recovery** per selector, grouped by **salience** — the shallow feature a
+   selector could use to find a fact, *computed* (not hand-tagged) via the
+   exported `SIGNAL_PATTERN` / `lineShape`:
+   - `positional` (head/tail): ~100% for every selector (control).
+   - `signal` (`SIGNAL_PATTERN`): `signal-preserving` 75%, `extractive` 75%,
+     Laya 75%; positional selectors 0%.
+   - `shape-novel` (unique `lineShape`): **`extractive` 100% — its own
+     `novelty = 1/shapeCount` term, by construction**; everyone else 0% (Laya 45%).
+   - `value` (no shallow feature — the hard class): **0% for every arm**,
+     Laya included (one coincidental `log-compact` hit).
+   Net: each "smart" selector wins exactly its own feature class *by
+   construction*; **no** selector — literal or model — recovers non-salient
+   content. This is why the earlier "extractive 93%" was circular, and it is now
+   retired.
 7. **Model-graded tier, offline (optional):** given a Laya relevance map
    (`laya.json`, produced by a scratch Python probe over `npm run eval:export`
    output — Laya is out-of-process; no dependency), `npm run eval` adds a `laya`
@@ -229,9 +232,10 @@ Two ledgers are recorded per session, and they measure different things.
    20% salient-class middle recovery, and a graded `score` rubric lifts it to
    **53%** (the fine-tuned `typed-decisions` head gives 47%, no better). That
    sits below `extractive`'s 93% **only on the salient class — a circular
-   comparison (see item 6)**; on the non-circular **plain** class Laya and
-   `extractive` are **tied at 0%**. Laya's per-line ranking stays bimodal
-   (git-diff facts #91-93/93). So the residual gap is the model, not the arm.
+   comparison (see item 6)**; on the non-circular **`value`** class (no shallow
+   feature) Laya and `extractive` are **tied at 0%**. Laya's per-line ranking stays
+   bimodal (git-diff facts #91-93/93). So the residual gap is the model, not the
+   arm.
    (The load warning about "uncalibrated temperatures" is the shipped `choice:11+`
    bucket, which the `noul`/`score` questions don't use.) Details in Basic Memory.
 
