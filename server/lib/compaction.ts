@@ -64,10 +64,14 @@ export function buildContinuityBlock(input: ContinuityInput): string {
   const decisions = (state?.decisions ?? []).slice(-MAX_DECISIONS)
   const files = state?.activeFiles ?? []
   const lastCommand = (state?.lastCommand ?? "").trim()
-  const hasOccupancy = state?.occupancy !== undefined && Number.isFinite(state.occupancy)
+  // Narrow the reading once, so the render below needs no non-null assertions:
+  // a finite `occupancy` is the only case where the line is emitted.
+  const occupancy = typeof state?.occupancy === "number" && Number.isFinite(state.occupancy)
+    ? state.occupancy
+    : undefined
 
   // Nothing worth carrying → inject nothing (an agent-only block is noise).
-  if (!task && !lastCommand && decisions.length === 0 && files.length === 0 && !hasOccupancy) {
+  if (!task && !lastCommand && decisions.length === 0 && files.length === 0 && occupancy === undefined) {
     return ""
   }
 
@@ -85,10 +89,10 @@ export function buildContinuityBlock(input: ContinuityInput): string {
 
   if (files.length > 0) lines.push(`Active files: ${files.join(", ")}`)
 
-  if (hasOccupancy) {
+  if (occupancy !== undefined) {
     const tokens = state?.tokens ?? 0
     const limit = state?.limit ?? 0
-    lines.push(`Context occupancy at last reading: ${percent(state!.occupancy!)} (~${tokens}/${limit} tokens)`)
+    lines.push(`Context occupancy at last reading: ${percent(occupancy)} (~${tokens}/${limit} tokens)`)
   }
 
   return lines.join("\n")
