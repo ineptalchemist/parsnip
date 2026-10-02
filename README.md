@@ -1,6 +1,22 @@
-# parsnip
+# Parsnip (parity + snip)
 
-A cache-preserving context manager for [OpenCode](https://opencode.ai) V2.
+A cache-preserving token-snipper for [OpenCode](https://opencode.ai) V2. Parsnip compresses tokens
+from specific tool calls (bash, shell, websearch) with the goal of preventing repetitive or non-relevant 
+tool outputs from being pushed through your agent's context window on every single prompt. This is ideal, as it 
+saves you money. However, this is also not ideal, as missing context can lead you and your agent down
+frustrating rabbit holes. 
+
+So, Parsnip keeps the context it cuts preserved in a cache that your agent can reference if something looks off. 
+All the information you need is preserved, your agents context window is cleared from debris, and you save a couple bucks. 
+
+Designed to work in tandem with OpenCode's native token-compaction processes. So, compression hardly actually fires off. In a modest session, 
+you can expect about 10k to 30k of tokens to actually be compressed. However, the effect multiplies as the session continues, as you prevent 
+30k tokens from re-enterting the context window every single time your agent looks at it. The end result is anywhere from 2%-10% in token savings
+across a long session. This adds up quick, and its free, with zero context actually stripped. Inspired by the [Token-Compressor]() approach, 
+which tries to avoid model-led summarization as it can be context-destructive and cost you more tokens in the long-run. 
+
+This project was largely vibecoded, and thrown together very fast. It's still in its early stages, and was mostly conceived of as a way to learn about and measure types of 
+token-compression and attempt context retrieval. It includes agent and cli-toggleable compression modes and a dedup that will fire very rarely. 
 
 Long sessions get expensive because the prompt grows. The usual fix is to fold
 stale history into summaries — but that rewrites the live conversation prefix and
