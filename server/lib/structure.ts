@@ -88,7 +88,11 @@ export type ServerEditorLike = {
 /** Opt-in only. With this `false` (the default) Phase 3 changes nothing. */
 export const STRUCTURE_PRUNE_ENABLED = false
 
-/** Report used-but-usable servers too? No — the report is about dead weight. */
+/**
+ * Filter the report to *dead weight* only — servers that are unused or
+ * unusable. Used-but-healthy servers are dropped from the report, because the
+ * report exists to answer "what can I turn off", not "what is configured".
+ */
 export const UNUSED_SERVERS_ONLY = true
 
 /** Skills are report-only: `Skill.Info` has no reversible off-switch. */
@@ -340,7 +344,15 @@ export async function saveStructureReport(
   await storage.set(structureKey(sessionID), report as unknown as Json)
 }
 
-/** Narrow stored JSON back to a report (used by Phase 4/5 readers). */
+/**
+ * Narrow stored JSON back to a `StructureReport`.
+ *
+ * Currently no production caller: the report is written per session but nothing
+ * reads it back yet, because there is no UI surface for it (the TUI footer work
+ * is not merged, and a sidebar panel is a separate plan). It exists — and is
+ * tested — so that a future reader does not have to re-derive the stored shape,
+ * and so a consumer can trust whatever it finds in `session:<id>:structure`.
+ */
 export function asStructureReport(value: unknown): StructureReport | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
   const v = value as Record<string, unknown>

@@ -469,9 +469,10 @@ export function compressExtractive(text: string, o: ExtractiveOptions): string {
 // --- Selector registry ------------------------------------------------------
 
 /**
- * Canonical list of selector ids. Grows one entry at a time as each selector
- * lands; `SelectorName` is derived from it so the config surface and the
- * registry can never drift.
+ * Canonical list of selector ids. `SelectorName` is derived from it, and
+ * `SELECTORS` is keyed by the same names, so adding an id here without
+ * registering an implementation is a type error rather than a runtime lookup
+ * failure.
  */
 export const SELECTOR_NAMES = [
   "head-tail",
