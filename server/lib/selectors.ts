@@ -63,9 +63,16 @@ export function compressText(text: string, o: CompressOptions): string {
 // --- Token-boundary helpers (for the token-budget selector) ------------------
 //
 // A cut is "safe" when it falls between tokens: after whitespace or a common
-// delimiter. `CHARS_PER_TOKEN` mirrors the uncalibrated `estimateTokens`
-// heuristic in `quality.ts` (chars / 4); it is only used to express the budget
-// in tokens, and is kept local so this module stays a leaf.
+// delimiter.
+//
+// `CHARS_PER_TOKEN` mirrors the `chars / 4` heuristic in `quality.ts`. It is NOT
+// a claim about real token counts — it only expresses this selector's budget in
+// token-shaped units so the option table reads naturally. It has no effect on
+// fidelity: the retained characters are verbatim either way, and the
+// `head-tail` budget it mirrors is identical in *chars*. (The plugin's actual
+// token measurement is the `session.usage.updated` ledger in `storage.ts`.)
+//
+// Kept local so this module stays a leaf with no import from `quality.ts`.
 
 const CHARS_PER_TOKEN = 4
 

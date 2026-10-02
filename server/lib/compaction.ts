@@ -15,6 +15,18 @@ export type ContinuityInput = {
 
 const MAX_TASK_CHARS = 240
 const MAX_DECISIONS = 8
+
+/**
+ * The *rendering* bound for the "Last command" line, applied when the continuity
+ * block is built.
+ *
+ * Deliberately not imported from `toolhooks.ts`: this module is a leaf and must
+ * not depend on it. The value there (`MAX_COMMAND_CHARS`, 200) is the
+ * *recording* bound applied in `execute.before`, so a command read out of
+ * storage is already at most this long and this truncation is normally a no-op
+ * — it only bites if a longer value was written by hand. Both are 200 on
+ * purpose; keep them in step if either changes.
+ */
 const MAX_COMMAND_CHARS = 200
 
 export function truncate(text: string, max: number): string {

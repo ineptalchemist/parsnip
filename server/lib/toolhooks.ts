@@ -71,7 +71,19 @@ export const TARGET_TOOLS: readonly string[] = [...SHELL_TOOLS, ...SEARCH_TOOLS]
 export const DEDUP_MARKER =
   "[ctx-guard: duplicate output suppressed — same command ran recently]"
 
-/** Longest command snippet kept as continuity state. */
+/**
+ * Longest command snippet kept as continuity state.
+ *
+ * This is the *recording* bound: `commandOf` truncates to it in `execute.before`
+ * before the value is written to `session:<id>`.
+ *
+ * `compaction.ts` has a same-valued constant of its own for the *rendering*
+ * bound (truncating again when building the continuity block). They are
+ * deliberately separate, not accidental duplicates: the value in storage is
+ * already at most this long, so the second truncation is normally a no-op and
+ * only bites if something wrote a longer value by hand. Kept as two constants
+ * because `compaction.ts` must stay a leaf module with no import from here.
+ */
 export const MAX_COMMAND_CHARS = 200
 
 // --- Savings ledger ---------------------------------------------------------
