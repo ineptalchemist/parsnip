@@ -122,3 +122,107 @@ export const CORPUS: CorpusItem[] = [
     })(),
   },
 ]
+
+/**
+ * Mid-sized items — the band a lowered threshold actually reaches.
+ *
+ * Sizes in the names are the generated lengths, not targets.
+ *
+ * `CORPUS` above is deliberately all above the 4000-char gate "so every selector
+ * actually engages", which makes it structurally unable to answer a question
+ * about the threshold: every item compresses at every setting. These items sit
+ * between ~900 and ~3800 chars, so a sweep can watch selectors *engage* as the
+ * threshold descends past them, which is the whole question.
+ *
+ * Shapes are drawn from what actually fills that band in real use: directory
+ * listings, grep hits, short diffs, compact JSON, a short build/test log, a
+ * narrow slice of a large file. Each carries real identifiers so the retention
+ * proxies have something to score.
+ */
+export const SMALL_CORPUS: CorpusItem[] = [
+  {
+    name: "directory listing (2265)",
+    axis: "threshold-band",
+    text: Array.from(
+      { length: 22 },
+      (_, i) =>
+        `-rw-r--r-- 1 oca oca ${String(1200 + i * 137).padStart(6)} Oct  1 21:${String(10 + i).padStart(2, "0")} ` +
+        `notes_directory/bonsai/record_conjecture_memory_2026-09-3${i % 10}.md`,
+    ).join("\n"),
+  },
+  {
+    name: "grep hits (1495)",
+    axis: "threshold-band",
+    text: Array.from(
+      { length: 26 },
+      (_, i) =>
+        `server/lib/${["selectors", "toolhooks", "config", "storage", "quality"][i % 5]}.ts:${40 + i * 7}:  ` +
+        `// ctx-guard ${["selector", "dedup", "threshold", "savings", "occupancy"][i % 5]} path ${i}`,
+    ).join("\n"),
+  },
+  {
+    name: "short diff (775)",
+    axis: "threshold-band",
+    text: [
+      "diff --git a/server/lib/config.ts b/server/lib/config.ts",
+      "index 8f3a21c..b7e9044 100644",
+      "--- a/server/lib/config.ts",
+      "+++ b/server/lib/config.ts",
+      "@@ -12,7 +12,9 @@ export type CtxGuardConfig = {",
+      "   compression: boolean",
+      "   dedup: boolean",
+      "   selector: SelectorName",
+      "+  minChars?: number",
+      " }",
+      "@@ -41,3 +43,8 @@ export function asConfigOverride(value: unknown)",
+      "+  const minChars = asMinChars(v.minChars)",
+      "+  if (minChars !== undefined) out.minChars = minChars",
+      "   return out",
+      " }",
+      "@@ -70,6 +77,7 @@ export function resolveConfig(",
+      "     dedup: sessionOverride.dedup ?? globalOverride.dedup ?? defaults.dedup,",
+      "     selector: sessionOverride.selector ?? globalOverride.selector ?? defaults.selector,",
+      "+    minChars: sessionOverride.minChars ?? globalOverride.minChars ?? defaults.minChars,",
+      "   }",
+      " }",
+    ].join("\n"),
+  },
+  {
+    name: "compact JSON (3435)",
+    axis: "threshold-band",
+    text: JSON.stringify(
+      {
+        events: Array.from({ length: 26 }, (_, i) => ({
+          seq: i + 1,
+          type: ["add", "supersede", "flag", "retract"][i % 4],
+          slot: `repo/ctx-guard/dependency/${["vitest", "eslint", "tsx", "zod"][i % 4]}`,
+          value: `${(i * 37) % 100}`.padStart(3, "0"),
+          status: i % 3 === 0 ? "conjecture" : "record",
+        })),
+      },
+      null,
+      1,
+    ),
+  },
+  {
+    name: "build/test log (2871)",
+    axis: "threshold-band",
+    text: Array.from(
+      { length: 48 },
+      (_, i) =>
+        i === 18
+          ? "FAIL server/lib/selectors.test.ts > threshold override > 3 subtests failed"
+          : `ok ${i + 1} - selector ${["head-tail", "token-budget", "log-compact"][i % 3]} budget ok ${"y".repeat(20)}`,
+    ).join("\n"),
+  },
+  {
+    name: "file slice (3601)",
+    axis: "threshold-band",
+    text: Array.from(
+      { length: 40 },
+      (_, i) =>
+        `line ${String(i + 1).padStart(3)} | const value${i} = compute${["Threshold", "Budget", "Reread"][i % 3]}` +
+        `(input${i}, factor${i}) // keeps identifier_${i} intact`,
+    ).join("\n"),
+  },
+]

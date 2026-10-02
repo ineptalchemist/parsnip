@@ -47,15 +47,17 @@ export const COMPRESSION_OPTIONS: CompressOptions = {
  * its behaviour before this existed.
  *
  * Deriving the budget from the threshold is what makes a lowered threshold do
- * anything at all. A selector only omits text once the input exceeds
- * `headChars + tailChars`, so with the budget frozen the *effective floor* is
- * 2800 regardless of where `minChars` sits: setting `minChars: 1000` left every
- * result under 2800 completely untouched (measured, not assumed). With the
- * budget derived the floor becomes 0.7 x the threshold and moves with it —
- * 2800 at the default, 1050 at a 1500 threshold.
+ * anything at all. Before this the budget was frozen at 2800 while the gate sat
+ * at 4000 - and since a selector only omits text once the input exceeds
+ * head+tail, the FROZEN BUDGET was the binding constraint: every result between
+ * 2800 and 4000 came back verbatim no matter where minChars sat. Measured, not
+ * assumed.
  *
- * The floor therefore stays strictly below the threshold, so the gate and the
- * budget can never disagree about whether a result is worth compressing.
+ * Derived, the budget is always 0.7 x the threshold, which is strictly below the
+ * threshold itself, so the GATE becomes the binding constraint and the effective
+ * floor is the threshold: at 4000 nothing under 4000 compacts (as before), and
+ * at 1500 the floor moves down to 1500 instead of staying stuck at 2800.
+ * Verified by bisection, not inferred from the formula.
  */
 export function budgetFor(minChars: number): { headChars: number; tailChars: number } {
   return { headChars: Math.round(minChars * 0.4), tailChars: Math.round(minChars * 0.3) }

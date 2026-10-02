@@ -20,57 +20,16 @@
 import { CORPUS } from "./corpus.ts"
 import { SELECTOR_NAMES, SELECTORS } from "../server/lib/selectors.ts"
 import {
-  fragments,
-  identifiers,
-  novelExactLines,
-  novelShapeLines,
-  pct,
-  retainedIdentifiers,
-  retainedLines,
-  signalLines,
-} from "./lib/proxies.ts"
-
-/** Uncalibrated token heuristic — chars / 4, same as `server/lib/quality.ts`. */
-const tokensOf = (chars: number): number => Math.ceil(chars / 4)
-
-/** Line-based proxies need lines: below this, a line-retention number is noise. */
-const LINE_METRIC_MIN_LINES = 3
-
-type Metrics = {
-  ratio: number
-  inputChars: number
-  outputChars: number
-  omittedTokens: number
-  signal: number | null
-  identifier: number | null
-  fragmentCount: number
-  novelExact: number | null
-  novelShape: number | null
-}
+  LINE_METRIC_MIN_LINES,
+  meanOrNull as mean,
+  metricsFor,
+  total as sum,
+  tokensOf,
+  type Metrics,
+} from "./lib/metrics.ts"
 
 type Row = { selector: string; metrics: Metrics }
 type ItemRows = { name: string; rows: Row[] }
-
-/** Pure: every metric for one (input, output) pair. */
-function metricsFor(input: string, output: string): Metrics {
-  const signal = signalLines(input)
-  const ids = identifiers(input)
-  const novelExact = novelExactLines(input)
-  const novelShape = novelShapeLines(input)
-  const lineMetrics = input.split("\n").filter((line) => line.length > 0).length >= LINE_METRIC_MIN_LINES
-
-  return {
-    ratio: input.length === 0 ? 1 : output.length / input.length,
-    inputChars: input.length,
-    outputChars: output.length,
-    omittedTokens: tokensOf(Math.max(0, input.length - output.length)),
-    signal: lineMetrics ? pct(retainedLines(output, signal), signal.length) : null,
-    identifier: pct(retainedIdentifiers(output, ids), ids.length),
-    fragmentCount: fragments(input, output),
-    novelExact: lineMetrics ? pct(retainedLines(output, novelExact), novelExact.length) : null,
-    novelShape: lineMetrics ? pct(retainedLines(output, novelShape), novelShape.length) : null,
-  }
-}
 
 // --- rendering --------------------------------------------------------------
 
@@ -122,11 +81,6 @@ function rowOf(row: Row): string[] {
     fmtPct(m.novelShape),
   ]
 }
-
-const mean = (values: number[]): number | null =>
-  values.length === 0 ? null : values.reduce((a, b) => a + b, 0) / values.length
-
-const sum = (values: number[]): number => values.reduce((a, b) => a + b, 0)
 
 function rollupRows(perItem: ItemRows[]): string[][] {
   return SELECTOR_NAMES.map((selector) => {

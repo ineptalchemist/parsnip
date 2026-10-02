@@ -11,7 +11,8 @@
     "compare": "node bench/compare.ts",
     "eval": "node bench/eval.ts",
     "eval:export": "node bench/export-facts.ts",
-    "savings": "node bench/read-savings.ts"
+    "savings": "node bench/read-savings.ts",
+    "sweep": "node bench/threshold.ts"
   },
   "devDependencies": {
     "@opencode/plugin": "2.0.20"

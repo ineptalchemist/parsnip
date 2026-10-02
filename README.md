@@ -54,12 +54,22 @@ Implemented (server side):
   never changes.
 
   The **threshold** is settable too, and it moves the kept budget with it:
-  `budgetFor(minChars)` derives head as 40% and tail as 30% of the threshold,
-  so the effective floor is 0.7 x the threshold (2800 default, 1050 at 1500).
+  `budgetFor(minChars)` derives head as 40% and tail as 30% of the threshold.
+  That budget is always below the threshold, so the threshold is the effective
+  floor: nothing under 4000 compacts by default, and a threshold of 1500 moves
+  the floor to 1500 instead of leaving it stuck at 2800.
   Set it with `ctxguard_config { minChars }` or `/ctx-guard threshold 1500`
   (range 800-200000; out-of-range is rejected, not clamped). Before this the
   budget was frozen at 2800 whatever the gate said, so any lower threshold
   was silently inert.
+
+  **Swept, and the default left alone.** `npm run sweep` runs the corpus across
+   nine thresholds. It shows a smooth trade with no knee — each step down gains
+   ~6-10k chars on mid-sized results and costs 3-8pp of identifier retention —
+   and it concentrates the cost on the wrong corpus: the bytes *gained* are all
+   in small results, while the retention *lost* is on the large results, whose
+   budget shrinks with everything else. So `MIN_CHARS` stays 4000. The threshold
+   is an escape hatch, not a better default.
 
   | Selector | Behaviour | Reach for it when |
   |---|---|---|
@@ -148,6 +158,8 @@ bench/
   lib/recovery.ts       pure known-answer recovery scoring
   lib/laya.ts           pure Laya-scored selection (consumes a relevance map; no dependency)
   read-savings.ts       dump per-session tokens + static/reread char savings
+  threshold.ts          sweep the compression threshold; decides the default
+  corpus.test.ts        tripwires keeping both corpora on their intended sides of the gate
   lib/reread.ts         the reread multiplier (chars × later model calls; pure)
 ```
 
