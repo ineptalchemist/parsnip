@@ -1,7 +1,8 @@
 # Parsnip (parity + snip)
 
 A cache-preserving token-snipper for [OpenCode](https://opencode.ai) V2. Parsnip compresses tokens
-from specific tool calls (bash, shell, websearch) with the goal of preventing repetitive or non-relevant 
+from specific tool calls (`bash`/`shell`, plus search and retrieval tools such as `websearch`, `web_fetch`,
+`firecrawl_scrape`) with the goal of preventing repetitive or non-relevant 
 tool outputs from being pushed through your agent's context window on every single prompt. This is ideal, as it 
 saves you money. However, this is also not ideal, as missing context can lead you and your agent down
 frustrating rabbit holes. 
@@ -9,10 +10,10 @@ frustrating rabbit holes.
 So, Parsnip keeps the context it cuts preserved in a cache that your agent can reference if something looks off. 
 All the information you need is preserved, your agents context window is cleared from debris, and you save a couple bucks. 
 
-Designed to work in tandem with OpenCode's native token-compaction processes. So, compression hardly actually fires off. In a modest session, 
-you can expect about 10k to 30k of tokens to actually be compressed. However, the effect multiplies as the session continues, as you prevent 
-30k tokens from re-enterting the context window every single time your agent looks at it. The end result is anywhere from 2%-10% in token savings
-across a long session. This adds up quick, and its free, with zero context actually stripped. Inspired by the [Token-Compressor]() approach, 
+Designed to work in tandem with OpenCode's native token-compaction processes. So, compression hardly actually fires off. It only engages when a tool
+returns something large *and* few-lined, which means the saving depends almost entirely on your workload — run `npm run savings` to see your own.
+The effect compounds: because the prompt is now permanently shorter, compressed tokens are never re-transmitted on any later call, so the static
+figure understates the real saving by roughly two orders of magnitude. And its free, with zero context actually stripped. Inspired by the [Token Optimizer](https://github.com/alexgreensh/token-optimizer) approach, 
 which tries to avoid model-led summarization as it can be context-destructive and cost you more tokens in the long-run. 
 
 This project was largely vibecoded, and thrown together very fast. It's still in its early stages, and was mostly conceived of as a way to learn about and measure types of 
@@ -25,6 +26,66 @@ throws away the provider's prompt cache. parsnip takes the opposite approach:
 boundary, and on new tool output as it enters the window.
 
 Everything it drops is recoverable, and it publishes what it dropped.
+
+## Nothing dropped is unrecoverable
+
+This is the property that makes the rest defensible. Compression is lossy to the
+**prompt** — the model sees a compacted result — but lossless to the **system**:
+the full pre-compression text of every dropped result is kept, and the compacted
+output carries a note naming it.
+
+```
+[parsnip: full text dropped — recall parsnip_recall("recall-3") — dropped region starts: "…"]
+```
+
+So the agent can answer from the compressed text *and verify*, for the cost of one
+tool call:
+
+```
+parsnip_recall { id: "recall-3" }
+```
+
+A human gets `/parsnip recall <id>`, which only logs the size — V2 commands cannot
+return output, so the tool is the real retrieval path. The store is bounded at
+**1 MB / 128 entries per session**, oldest evicted first.
+
+**Why this is a guarantee and not a promise.** A built-in known-answer eval plants
+unique facts at controlled depths and scores what each compression method actually
+recovers, grouped by *salience* — the shallow feature a method could use to find a
+fact, computed rather than hand-tagged:
+
+| salience class | best method | note |
+|---|---|---|
+| `positional` (head/tail) | 100% for all | control — every method keeps the edges |
+| `signal` (error keywords, `file:line`, hashes) | `signal-preserving` 75% | *its own* pattern |
+| `shape-novel` (unique line shape) | `extractive` 100% | *its own* `novelty = 1/shapeCount` term |
+| `value` (no shallow feature at all) | **0% — one coincidental hit** | model-graded arm included |
+
+The bottom row is the point. Each method wins exactly the class it was built for,
+by construction — and on facts with nothing distinguishing about them, **nothing
+reliably recovers them**. That is not a bug to be tuned away; it is why selection
+cannot be trusted in the general case, and why retrieval has to exist.
+
+### Prose is a different problem than logs
+
+Logs carry redundancy for `log-compact` to collapse. A fetched article carries
+none — every paragraph is a unique line. Measured on two prose fixtures (a
+long-form article and a docs page, with facts planted at known depths), `extractive`
+recovered **4/4** middle facts on both, while every other method recovered **2/4**
+— and both of those from the head/tail the baseline keeps anyway.
+
+Two caveats, because the number is flattering. `extractive` wins there on its own
+salience class, since unique paragraph shapes are precisely what its novelty term
+detects. And the `compare` harness cannot measure prose at all: `novel-x` saturates
+at the kept fraction (26.1% across all five methods), so planted-fact recovery is
+the only signal worth reading.
+
+The general lesson is the one the recall cache exists for: **"it worked in that one
+case" is not a safety property.** Selection can look reliable exactly where it
+happens to succeed.
+
+Dedup drops are not in the recall store — the original is already in context from
+the first occurrence.
 
 ## Why the cache survives
 
@@ -138,7 +199,8 @@ markers carrying counts.
 | `signal-preserving` | Head + tail plus bounded middle lines matching a diagnostic pattern (errors, `file:line`, hashes, URLs) | You are reading build/test output and want the failures |
 | `extractive` | 3-line lead + tail plus the highest-scoring middle lines (position, length, signal, shape novelty) | Output is heterogeneous and you want the "interesting" lines |
 
-Every selector's dropped text is recoverable — see the recall cache below.
+Every selector's dropped text is recoverable — see "Nothing dropped is
+unrecoverable" above.
 
 ## Duplicate suppression
 
@@ -149,30 +211,12 @@ key would create. Applies to shell and search/retrieval tools; state-query tools
 (`read`, `grep`) are deliberately excluded. The per-session ring holds 16
 signatures.
 
-## Nothing dropped is unrecoverable
+## What compression can and cannot do
 
-Compression is lossy to the **prompt** but lossless to the **system**.
-
-The full pre-compression text of every dropped result is kept in a bounded
-per-session store (1 MB / 128 entries, oldest evicted first), and the compressed
-output gains a note naming the id:
-
-```
-[parsnip: full text dropped — recall parsnip_recall("recall-3") — …]
-```
-
-The agent retrieves it with the `parsnip_recall` tool. A human can use
-`/parsnip recall <id>`, which only logs the size — V2 commands cannot return
-output, so the tool is the real retrieval path.
-
-This is the backstop for a hard limit: **no selector can know a priori which part
-of a result matters.** The known-answer eval confirms it — on facts with no
-shallow feature (no error keyword, no unique shape), *every* approach recovers
-0%. If selection is that unreliable in the general case, recovery has to be a
-guarantee rather than a hope.
-
-Dedup is not in this store: the original is already in context from the first
-occurrence.
+`read` and `grep` are **not** compression targets. Neither are `result.output`,
+`result.metadata`, or `{ type: "file" }` content parts, and error results are never
+touched. Only the text content of a completed result from a target tool is
+rewritten.
 
 ## Measuring effects
 
@@ -227,7 +271,7 @@ Selectors were compared this way before any ran in anger.
 
 Retention proxies cannot separate `head-tail` from `token-budget` — both keep the
 same budget, and a cut fragment never counts as retained. The fragment proxy can,
-and does: **9 vs 2** fragments over the corpus, `token-budget`'s 2 being the
+and does: **10 vs 2** fragments over the corpus, `token-budget`'s 2 being the
 no-boundary fallback case only.
 
 The proxies compare *visible* text (ANSI stripped, so `log-compact`'s ANSI strip
@@ -290,11 +334,11 @@ server/
   *.test.ts             node:test suites (no framework)
 bench/
   run.ts                offline ceiling benchmark
-  corpus.ts             curated 8-item corpus, one per differentiating axis
+  corpus.ts             curated 9-item corpus, one per differentiating axis
   compare.ts            cross-selector comparison
   threshold.ts          threshold sweep; decides the default
   eval.ts               known-answer eval: planted-fact recovery per selector
-  facts.ts              eval corpus: realistic outputs + planted facts
+  facts.ts              eval corpus: realistic outputs (logs, diffs, prose) + planted facts
   export-facts.ts       dump the fact corpus to JSON for the relevance probe
   read-savings.ts       dump per-session tokens + static/reread savings
   lib/metrics.ts        shared metrics for compare + sweep
