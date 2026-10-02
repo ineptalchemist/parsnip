@@ -11,6 +11,7 @@ import {
   SIGNAL_OPTIONS,
   SIGNAL_PATTERN,
   TAIL_CHARS,
+  budgetFor,
   TOKEN_BUDGET_OPTIONS,
   collapseRuns,
   compressExtractive,
@@ -334,4 +335,106 @@ test("extractive select: a novel non-signal middle line outranks repetitive fill
   const out = extractive.select(lines.join("\n"))
 
   assert.ok(out.includes("UNIQUE-MIDDLE-VALUE"), "a novel middle line must be kept")
+})
+
+// --- threshold override -----------------------------------------------------
+//
+// A selector's head/tail budget is now DERIVED from the threshold rather than
+// frozen at HEAD_CHARS/TAIL_CHARS. Without this, `minChars` below 2800 did
+// nothing at all: the effective floor was head+tail, so every smaller result was
+// returned verbatim. These tests pin the derivation and its backward
+// compatibility.
+
+test("budgetFor: reproduces the historical budget at the default threshold", () => {
+  assert.deepEqual(budgetFor(MIN_CHARS), { headChars: HEAD_CHARS, tailChars: TAIL_CHARS })
+})
+
+test("budgetFor: scales with the threshold, and the floor stays below it", () => {
+  assert.deepEqual(budgetFor(1500), { headChars: 600, tailChars: 450 })
+  assert.deepEqual(budgetFor(2000), { headChars: 800, tailChars: 600 })
+  // head+tail must remain under the gate, or nothing is ever omitted.
+  for (const minChars of [400, 800, 1500, 2000, 4000, 20000]) {
+    const { headChars, tailChars } = budgetFor(minChars)
+    assert.ok(headChars + tailChars < minChars, `floor ${headChars + tailChars} >= ${minChars}`)
+  }
+})
+
+test("select: no override is byte-identical to the pre-derivation behaviour", () => {
+  const text = "b".repeat(MIN_CHARS + 1000)
+  assert.equal(headTail.select(text), compressText(text, COMPRESSION_OPTIONS))
+  for (const selector of Object.values(SELECTORS)) {
+    assert.equal(selector.select(text), selectWith(selector.id, text))
+  }
+})
+
+test("select: a lowered threshold reaches results the frozen floor missed", () => {
+  // The regression: 1500 chars is under the old 2800 floor, so it came back
+  // verbatim at any threshold setting. It must now compact.
+  const text = "c".repeat(1500)
+  assert.equal(headTail.select(text), text, "untouched at the default — floor is 2800")
+  for (const selector of Object.values(SELECTORS)) {
+    const out = selector.select(text, 1200)
+    assert.ok(out.length < text.length, `${selector.id} did not compact a 1500-char result`)
+    assert.match(out, /ctx-guard/, `${selector.id} emitted no marker`)
+  }
+})
+
+test("select: the budget shrinks with the threshold, not just the gate", () => {
+  const text = "d".repeat(9000)
+  const big = headTail.select(text, 4000)
+  const small = headTail.select(text, 1200)
+  assert.ok(small.length < big.length, "a lower threshold must keep fewer chars")
+  // 40%/30% of the threshold, plus the marker and its two joining newlines.
+  assert.equal(big.length, 1600 + 1200 + omissionMarker(9000 - 2800).length + 2)
+  assert.equal(small.length, 480 + 360 + omissionMarker(9000 - 840).length + 2)
+})
+
+test("select: an unusable threshold falls back to the selector defaults", () => {
+  const text = "e".repeat(MIN_CHARS + 100)
+  const expected = headTail.select(text)
+  for (const bad of [0, -1, 100, Number.NaN, Number.POSITIVE_INFINITY, undefined]) {
+    assert.equal(headTail.select(text, bad), expected, `minChars=${String(bad)} was not rejected`)
+  }
+})
+
+test("select: a result under the lowered threshold is still left untouched", () => {
+  const text = "f".repeat(1199)
+  for (const selector of Object.values(SELECTORS)) {
+    assert.equal(selector.select(text, 1200), text, `${selector.id} compressed below the gate`)
+  }
+})
+
+test("selectWith: forwards the threshold override to the named selector", () => {
+  const text = "g".repeat(1500)
+  assert.equal(selectWith("head-tail", text), text)
+  assert.ok(selectWith("head-tail", text, 1200).length < text.length)
+  assert.equal(selectWith("extractive", text, 1200), extractive.select(text, 1200))
+})
+
+test("extractive: the few-lines fallback honours the override", () => {
+  // One long line: too few lines to rank, so it falls through to head-tail.
+  // That fallback must see the override too, or a lowered threshold silently
+  // does nothing on the giant-one-liner case.
+  const oneLiner = "h".repeat(1500)
+  assert.equal(compressExtractive(oneLiner, EXTRACTIVE_OPTIONS), oneLiner)
+  const lowered = compressExtractive(oneLiner, {
+    ...EXTRACTIVE_OPTIONS,
+    minChars: 1200,
+    fallback: { minChars: 1200, ...budgetFor(1200) },
+  })
+  assert.ok(lowered.length < oneLiner.length)
+})
+
+test("log-compact: the post-compaction fallback honours the override", () => {
+  // Distinct lines, so collapseRuns cannot shrink this first — the head-tail
+  // fallback is what bounds it, and that must see the override.
+  const text = Array.from({ length: 400 }, (_, i) => `distinct line ${i} of the log`).join("\n")
+  const lowered = compressLog(text, {
+    ...LOG_COMPACT_OPTIONS,
+    minChars: 1200,
+    fallback: { minChars: 1200, ...budgetFor(1200) },
+  })
+  const defaultRun = compressLog(text, LOG_COMPACT_OPTIONS)
+  assert.ok(defaultRun.length > 2800, "precondition: the default bound is 2800")
+  assert.ok(lowered.length < defaultRun.length)
 })

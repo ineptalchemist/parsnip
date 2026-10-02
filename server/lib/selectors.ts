@@ -40,6 +40,36 @@ export const COMPRESSION_OPTIONS: CompressOptions = {
   tailChars: TAIL_CHARS,
 }
 
+/**
+ * The head/tail budget implied by a threshold: 40% from the front, 30% from the
+ * back. At the default `MIN_CHARS` (4000) this is exactly the historical
+ * HEAD_CHARS/TAIL_CHARS pair, so a selector with no override is byte-identical to
+ * its behaviour before this existed.
+ *
+ * Deriving the budget from the threshold is what makes a lowered threshold do
+ * anything at all. A selector only omits text once the input exceeds
+ * `headChars + tailChars`, so with the budget frozen the *effective floor* is
+ * 2800 regardless of where `minChars` sits: setting `minChars: 1000` left every
+ * result under 2800 completely untouched (measured, not assumed). With the
+ * budget derived the floor becomes 0.7 x the threshold and moves with it —
+ * 2800 at the default, 1050 at a 1500 threshold.
+ *
+ * The floor therefore stays strictly below the threshold, so the gate and the
+ * budget can never disagree about whether a result is worth compressing.
+ */
+export function budgetFor(minChars: number): { headChars: number; tailChars: number } {
+  return { headChars: Math.round(minChars * 0.4), tailChars: Math.round(minChars * 0.3) }
+}
+
+/**
+ * A threshold override is honoured only when it is a finite number that clears
+ * the floor. Anything else (absent, NaN, 0, negative, absurdly small) falls back
+ * to the selector's own defaults rather than producing a degenerate budget.
+ */
+function validThreshold(minChars: number | undefined): minChars is number {
+  return typeof minChars === "number" && Number.isFinite(minChars) && minChars >= 200
+}
+
 export function omissionMarker(omittedChars: number): string {
   return `… [ctx-guard: ${omittedChars} chars omitted] …`
 }
@@ -342,6 +372,12 @@ export type ExtractiveOptions = {
   signalWeight: number
   /** Score bonus for a line whose shape is unique (scaled by 1 / shape count). */
   noveltyWeight: number
+  /**
+   * Head-tail bound applied when the result has too few lines to rank away (the
+   * giant-one-liner case). Carried in the options rather than referenced from the
+   * module constant so a threshold override reaches it too.
+   */
+  fallback: CompressOptions
 }
 
 export const EXTRACTIVE_OPTIONS: ExtractiveOptions = {
@@ -354,6 +390,7 @@ export const EXTRACTIVE_OPTIONS: ExtractiveOptions = {
   leadBias: 5,
   signalWeight: 2,
   noveltyWeight: 1,
+  fallback: COMPRESSION_OPTIONS,
 }
 
 /** Trim a line to `max` chars, marking the cut with "…". */
@@ -428,7 +465,7 @@ export function compressExtractive(text: string, o: ExtractiveOptions): string {
   const lines = text.split("\n")
   // Few lines: nothing to select away, and lead/tail would overlap — bound by
   // chars instead (the giant-one-liner case).
-  if (lines.length <= o.maxLines) return compressText(text, COMPRESSION_OPTIONS)
+  if (lines.length <= o.maxLines) return compressText(text, o.fallback)
 
   const emit = (line: string): string => truncateLine(line, o.maxLineChars)
   const lead = lines.slice(0, o.leadLines)
@@ -484,16 +521,28 @@ export const SELECTOR_NAMES = [
 
 export type SelectorName = (typeof SELECTOR_NAMES)[number]
 
-/** A faithful compactor: output is a verbatim subset of the input, never generated. */
+/**
+ * A faithful compactor: output is a verbatim subset of the input, never generated.
+ *
+ * `minChars` is an optional per-call threshold override. When omitted — or
+ * rejected by `validThreshold` — the selector uses its own defaults, so every
+ * existing single-argument call site behaves exactly as before.
+ */
 export type CompressionSelector = {
   id: SelectorName
-  select: (text: string) => string
+  select: (text: string, minChars?: number) => string
+}
+
+/** Head-tail options for this call: derived from the override, or the defaults. */
+function headTailAt(minChars: number | undefined): CompressOptions {
+  if (!validThreshold(minChars)) return COMPRESSION_OPTIONS
+  return { minChars, ...budgetFor(minChars) }
 }
 
 /** Positional head + tail with a counted omission marker. The baseline selector. */
 export const headTail: CompressionSelector = {
   id: "head-tail",
-  select: (text) => compressText(text, COMPRESSION_OPTIONS),
+  select: (text, minChars) => compressText(text, headTailAt(minChars)),
 }
 
 /**
@@ -503,7 +552,17 @@ export const headTail: CompressionSelector = {
  */
 export const tokenBudget: CompressionSelector = {
   id: "token-budget",
-  select: (text) => compressTokenBudget(text, TOKEN_BUDGET_OPTIONS),
+  // Expresses the same derived budget in tokens: the char budget ÷ CHARS_PER_TOKEN.
+  select: (text, minChars) => {
+    if (!validThreshold(minChars)) return compressTokenBudget(text, TOKEN_BUDGET_OPTIONS)
+    const { headChars, tailChars } = budgetFor(minChars)
+    return compressTokenBudget(text, {
+      ...TOKEN_BUDGET_OPTIONS,
+      minTokens: Math.round(minChars / CHARS_PER_TOKEN),
+      headTokens: Math.round(headChars / CHARS_PER_TOKEN),
+      tailTokens: Math.round(tailChars / CHARS_PER_TOKEN),
+    })
+  },
 }
 
 /**
@@ -513,7 +572,12 @@ export const tokenBudget: CompressionSelector = {
  */
 export const logCompact: CompressionSelector = {
   id: "log-compact",
-  select: (text) => compressLog(text, LOG_COMPACT_OPTIONS),
+  select: (text, minChars) => {
+    if (!validThreshold(minChars)) return compressLog(text, LOG_COMPACT_OPTIONS)
+    // The head-tail fallback shares the override, so the post-compaction bound
+    // moves with the gate rather than staying frozen at 2800.
+    return compressLog(text, { ...LOG_COMPACT_OPTIONS, minChars, fallback: headTailAt(minChars) })
+  },
 }
 
 /**
@@ -522,7 +586,8 @@ export const logCompact: CompressionSelector = {
  */
 export const signalPreserving: CompressionSelector = {
   id: "signal-preserving",
-  select: (text) => compressSignal(text, SIGNAL_OPTIONS),
+  select: (text, minChars) =>
+    compressSignal(text, validThreshold(minChars) ? { ...SIGNAL_OPTIONS, minChars, ...budgetFor(minChars) } : SIGNAL_OPTIONS),
 }
 
 /**
@@ -531,7 +596,18 @@ export const signalPreserving: CompressionSelector = {
  */
 export const extractive: CompressionSelector = {
   id: "extractive",
-  select: (text) => compressExtractive(text, EXTRACTIVE_OPTIONS),
+  select: (text, minChars) => {
+    if (!validThreshold(minChars)) return compressExtractive(text, EXTRACTIVE_OPTIONS)
+    // `maxChars` is the ranked-middle budget, half the threshold — matching
+    // the historical 2000 at the default 4000. The lead/tail line counts stay
+    // fixed: they are structural, not size-derived.
+    return compressExtractive(text, {
+      ...EXTRACTIVE_OPTIONS,
+      minChars,
+      maxChars: Math.round(minChars * 0.5),
+      fallback: headTailAt(minChars),
+    })
+  },
 }
 
 export const SELECTORS: Record<SelectorName, CompressionSelector> = {
@@ -554,7 +630,12 @@ export function resolveSelector(name: string): CompressionSelector {
   return isSelectorName(name) ? SELECTORS[name] : headTail
 }
 
-/** Resolve + apply in one call, for the hook's one-liner. */
-export function selectWith(name: string, text: string): string {
-  return resolveSelector(name).select(text)
+/**
+ * Resolve + apply in one call, for the hook's one-liner.
+ *
+ * `minChars` is forwarded to the selector as a threshold override; omit it to get
+ * that selector's built-in defaults.
+ */
+export function selectWith(name: string, text: string, minChars?: number): string {
+  return resolveSelector(name).select(text, minChars)
 }
