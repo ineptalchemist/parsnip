@@ -29,9 +29,13 @@ import type { SessionCompaction, SessionContext } from "@opencode/plugin/promise
 import type { ToolEditor } from "@opencode/plugin/promise/tool"
 import type { CommandEditor } from "@opencode/plugin/promise/command"
 import type { Model } from "@opencode/schema/model"
-import { buildContinuityBlock } from "./lib/compaction.ts"
+import { buildContinuityBlock, promptText as promptInputText, truncate } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
 import {
+  appendActiveFile,
+  appendDecision,
+  describeDecision,
+  filePathOf,
   loadContinuity,
   loadSavings,
   saveContinuity,
@@ -311,6 +315,11 @@ async function register(
 
 const CONFIG_TOOL_NAME = "ctxguard_config"
 
+/** Longest stored form of the current task; the block truncates again on render. */
+const MAX_TASK_CHARS = 240
+
+const truncateTask = (text: string): string => truncate(text, MAX_TASK_CHARS)
+
 /** Best-effort text from a command prompt (SDK prompt shape not pinned down). */
 function promptText(prompt: unknown): string {
   if (typeof prompt === "string") return prompt
@@ -322,6 +331,42 @@ function promptText(prompt: unknown): string {
     if (typeof p.content === "string") return p.content
   }
   return ""
+}
+
+/**
+ * Record an explicit config change as a continuity decision.
+ *
+ * Only *human/agent-initiated* toggles are recorded — a bare `ctxguard_config`
+ * view changes nothing and so records nothing. Best-effort: a failure here must
+ * never fail the config write that triggered it.
+ */
+async function recordConfigDecision(
+  ctx: Plugin.Context,
+  sessionID: string,
+  patch: ConfigOverride,
+  scope: ConfigScope,
+  reset = false,
+): Promise<void> {
+  const decision = describeDecision(patch, scope, reset)
+  if (!decision) return
+  try {
+    const previous = await loadContinuity(ctx.storage, sessionID)
+    const decisions = appendDecision(previous?.decisions ?? [], decision)
+    if (!decisions) return
+    await saveContinuity(ctx.storage, sessionID, {
+      lastTask: previous?.lastTask ?? "",
+      decisions,
+      activeFiles: previous?.activeFiles ?? [],
+      agent: previous?.agent,
+      tokens: previous?.tokens,
+      limit: previous?.limit,
+      occupancy: previous?.occupancy,
+      updatedAt: Date.now(),
+      lastCommand: previous?.lastCommand,
+    })
+  } catch (error) {
+    console.error("[ctx-guard] decision record failed (ignored):", error)
+  }
 }
 
 /**
@@ -370,7 +415,10 @@ function configTool(ctx: Plugin.Context) {
         patch.compression !== undefined ||
         patch.selector !== undefined ||
         patch.dedup !== undefined
-      if (changed) await applyConfigPatch(ctx.storage, toolContext.sessionID, patch, { scope, reset })
+      if (changed) {
+        await applyConfigPatch(ctx.storage, toolContext.sessionID, patch, { scope, reset })
+        await recordConfigDecision(ctx, toolContext.sessionID, patch, scope, reset)
+      }
 
       const [globalOverride, sessionOverride] = await Promise.all([
         loadGlobalConfig(ctx.storage),
@@ -467,6 +515,7 @@ function configCommand(ctx: Plugin.Context) {
 
       if (words[0] === "reset") {
         await applyConfigPatch(ctx.storage, invocation.sessionID, {}, { scope, reset: true })
+        await recordConfigDecision(ctx, invocation.sessionID, {}, scope, true)
         return
       }
 
@@ -474,6 +523,7 @@ function configCommand(ctx: Plugin.Context) {
         const name = words[1]
         if (!isSelectorName(name)) return // silent on an unknown selector
         await applyConfigPatch(ctx.storage, invocation.sessionID, { selector: name }, { scope })
+        await recordConfigDecision(ctx, invocation.sessionID, { selector: name }, scope)
         return
       }
 
@@ -485,6 +535,7 @@ function configCommand(ctx: Plugin.Context) {
       else if (field === "dedup") patch.dedup = enabled
       else return
       await applyConfigPatch(ctx.storage, invocation.sessionID, patch, { scope })
+      await recordConfigDecision(ctx, invocation.sessionID, patch, scope)
     },
   }
 }
@@ -644,6 +695,36 @@ const ctxGuard: Plugin.Plugin = {
       ),
     )
 
+    // --- Continuity: current task (read-only) --------------------------------
+    //
+    // `lastTask` was the third permanently-empty field: nothing wrote it, so the
+    // block only ever saw the `lastUserText(messages)` fallback *at compaction
+    // time* — i.e. the last thing said before the summary, not the task being
+    // worked on. Capturing it here records the actual ask, and the fallback
+    // stays in place for sessions that predate this hook.
+    await register(registrations, "prompt", () =>
+      ctx.session.hook(
+        "prompt",
+        guarded("prompt", async (event) => {
+          const task = promptInputText(event.prompt).trim()
+          if (!task) return
+
+          const previous = await loadContinuity(ctx.storage, event.sessionID)
+          await saveContinuity(ctx.storage, event.sessionID, {
+            lastTask: truncateTask(task),
+            decisions: previous?.decisions ?? [],
+            activeFiles: previous?.activeFiles ?? [],
+            agent: previous?.agent,
+            tokens: previous?.tokens,
+            limit: previous?.limit,
+            occupancy: previous?.occupancy,
+            updatedAt: Date.now(),
+            lastCommand: previous?.lastCommand,
+          })
+        }),
+      ),
+    )
+
     // --- Tool hooks: bash/shell output compression + dedup --------------------
     // `execute.before` (read-only): remember the last command for the
     // continuity block. `event.input` is never mutated.
@@ -669,21 +750,26 @@ const ctxGuard: Plugin.Plugin = {
             await refreshStructure(ctx, state, event.sessionID)
           }
 
-          if (!isTargetTool(event.tool)) return
-          const command = commandOf(event.input)
-          if (!command) return
+          // Continuity fields this hook owns. `lastCommand` for shell targets;
+          // `activeFiles` for file tools. Both are pure additions to whatever
+          // the previous record held, so the two never clobber each other.
+          const command = isTargetTool(event.tool) ? commandOf(event.input) : ""
+          const file = filePathOf(event.tool, event.input)
+          if (!command && !file) return
 
           const previous = await loadContinuity(ctx.storage, event.sessionID)
+          const activeFiles = file ? appendActiveFile(previous?.activeFiles ?? [], file) : undefined
+
           await saveContinuity(ctx.storage, event.sessionID, {
             lastTask: previous?.lastTask ?? "",
             decisions: previous?.decisions ?? [],
-            activeFiles: previous?.activeFiles ?? [],
+            activeFiles: activeFiles ?? previous?.activeFiles ?? [],
             agent: event.agent,
             tokens: previous?.tokens,
             limit: previous?.limit,
             occupancy: previous?.occupancy,
             updatedAt: Date.now(),
-            lastCommand: command,
+            lastCommand: command || previous?.lastCommand,
           })
         }),
       ),

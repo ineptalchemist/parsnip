@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
-import { asContinuity, asSavings, asTokenUsage, loadSavings, loadTokenUsage, saveSavings, saveTokenUsage, savingsKey, sessionKey, tokenUsageFrom, tokenUsageKey } from "./storage.ts"
+import { appendActiveFile, appendDecision, asContinuity, asSavings, asTokenUsage, describeDecision, filePathOf, loadSavings, loadTokenUsage, saveSavings, saveTokenUsage, savingsKey, sessionKey, tokenUsageFrom, tokenUsageKey } from "./storage.ts"
 
 test("sessionKey: namespaces by session", () => {
   assert.equal(sessionKey("ses_abc"), "session:ses_abc")
@@ -203,4 +203,51 @@ test("loadTokenUsage / saveTokenUsage: round-trip, overwrite is cumulative", asy
 
   // A different session is independent.
   assert.equal(await loadTokenUsage(storage, "ses_2"), undefined)
+})
+
+// --- continuity derivation (pure) --------------------------------------------
+
+test("filePathOf: reads filePath or path from a file tool, and nothing else", () => {
+  assert.equal(filePathOf("read", { filePath: "/a/b.ts" }), "/a/b.ts")
+  assert.equal(filePathOf("edit", { path: "/a/b.ts" }), "/a/b.ts")
+  assert.equal(filePathOf("READ", { filePath: "/a/b.ts" }), "/a/b.ts", "tool match is case-insensitive")
+
+  // Non-file tools never contribute a path.
+  assert.equal(filePathOf("shell", { command: "cat /a/b.ts" }), "")
+  assert.equal(filePathOf("grep", { path: "/a" }), "")
+
+  // Junk and empties are rejected rather than recorded.
+  assert.equal(filePathOf("read", undefined), "")
+  assert.equal(filePathOf("read", null), "")
+  assert.equal(filePathOf("read", []), "")
+  assert.equal(filePathOf("read", { filePath: 42 }), "")
+  assert.equal(filePathOf("read", { filePath: "   " }), "")
+})
+
+test("appendActiveFile: dedupes, bounds, and reports no-change", () => {
+  assert.deepEqual(appendActiveFile([], "/a"), ["/a"])
+  assert.deepEqual(appendActiveFile(["/a"], "/b"), ["/a", "/b"])
+  assert.equal(appendActiveFile(["/a"], "/a"), undefined, "a repeat is not a change")
+  assert.equal(appendActiveFile([], ""), undefined, "an empty path is not a change")
+
+  // Bounded, oldest evicted first.
+  const many = Array.from({ length: 5 }, (_, i) => `/f${i}`)
+  assert.deepEqual(appendActiveFile(many, "/f5", 3), ["/f3", "/f4", "/f5"])
+})
+
+test("describeDecision: renders only explicit changes", () => {
+  assert.equal(
+    describeDecision({ compression: true, dedup: false, selector: "extractive" }, "global"),
+    "ctx-guard: compression on, dedup off, selector extractive (global)",
+  )
+  assert.equal(describeDecision({ compression: true }, "session"), "ctx-guard: compression on (session)")
+  assert.equal(describeDecision({}, "global", true), "ctx-guard config reset (global)")
+  assert.equal(describeDecision({}, "global"), "", "an empty patch is not a decision")
+})
+
+test("appendDecision: dedupes, bounds, and reports no-change", () => {
+  assert.deepEqual(appendDecision([], "d1"), ["d1"])
+  assert.equal(appendDecision(["d1"], "d1"), undefined, "a repeat is not a change")
+  assert.equal(appendDecision([], ""), undefined, "an empty decision is not a change")
+  assert.deepEqual(appendDecision(["d1", "d2", "d3"], "d4", 2), ["d3", "d4"])
 })

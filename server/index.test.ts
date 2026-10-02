@@ -221,6 +221,7 @@ test("setup returns a cleanup that disposes every registration", async () => {
     "model.transform",
     "session.hook:compaction",
     "session.hook:context",
+    "session.hook:prompt",
     "skill.transform",
     "tool.hook:execute.after",
     "tool.hook:execute.before",
@@ -951,6 +952,173 @@ test("execute.after: no recall entry when compression is off", async () => {
 
   await h.hooks["execute.after"](toolEvent())
   assert.equal(h.store.has("session:ses_test:recall"), false)
+})
+
+// --- continuity: filling the empty fields -------------------------------------
+//
+// Until 2026-10-01 `decisions`, `activeFiles` and `lastTask` were never
+// populated: the two continuity write paths only ever *copied them forward*, so
+// the block rendered empty `Recent decisions:` / `Active files:` sections in
+// every session (measured 0/51). These lock the fix in place.
+
+test("execute.before: a file tool populates activeFiles", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.before"](
+    toolEvent({ tool: "read", input: { filePath: "/home/oca/project/a.ts" } }),
+  )
+  let state = h.store.get("session:ses_test") as AnyRecord
+  assert.deepEqual(state.activeFiles, ["/home/oca/project/a.ts"])
+
+  await h.hooks["execute.before"](
+    toolEvent({ tool: "edit", input: { filePath: "/home/oca/project/b.ts" } }),
+  )
+  state = h.store.get("session:ses_test") as AnyRecord
+  assert.deepEqual(state.activeFiles, ["/home/oca/project/a.ts", "/home/oca/project/b.ts"])
+
+  // A re-read of a tracked file must not duplicate or reorder.
+  await h.hooks["execute.before"](
+    toolEvent({ tool: "read", input: { filePath: "/home/oca/project/a.ts" } }),
+  )
+  state = h.store.get("session:ses_test") as AnyRecord
+  assert.deepEqual(state.activeFiles, ["/home/oca/project/a.ts", "/home/oca/project/b.ts"])
+})
+
+test("execute.before: activeFiles and lastCommand do not clobber each other", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  // A shell target sets lastCommand; a file tool sets activeFiles. Both write
+  // the same record, so each must preserve the other's field.
+  await h.hooks["execute.before"](toolEvent({ tool: "shell", input: { command: "npm test" } }))
+  await h.hooks["execute.before"](toolEvent({ tool: "read", input: { path: "/x/y.ts" } }))
+
+  const state = h.store.get("session:ses_test") as AnyRecord
+  assert.equal(state.lastCommand, "npm test", "the file write dropped lastCommand")
+  assert.deepEqual(state.activeFiles, ["/x/y.ts"], "the shell write dropped activeFiles")
+})
+
+test("execute.before: a non-file tool leaves activeFiles alone", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.before"](toolEvent({ tool: "grep", input: { path: "/x/y.ts" } }))
+  assert.equal(h.store.has("session:ses_test"), false, "grep must not create a record")
+})
+
+test("prompt hook: records the current task, preserving the other fields", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks["execute.before"](toolEvent({ tool: "read", input: { path: "/x/y.ts" } }))
+  await h.hooks["execute.before"](toolEvent({ tool: "shell", input: { command: "npm test" } }))
+
+  await h.hooks.prompt({
+    sessionID: "ses_test",
+    agent: "build",
+    prompt: { parts: [{ type: "text", text: "fix the flaky selector test" }] },
+  })
+
+  const state = h.store.get("session:ses_test") as AnyRecord
+  assert.equal(state.lastTask, "fix the flaky selector test")
+  assert.equal(state.lastCommand, "npm test", "the prompt write dropped lastCommand")
+  assert.deepEqual(state.activeFiles, ["/x/y.ts"], "the prompt write dropped activeFiles")
+})
+
+test("config tool: a change records a decision; a bare view does not", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+
+  await added[0].execute({}, { sessionID: "ses_test" }) // view: writes nothing
+  assert.equal(h.store.has("session:ses_test"), false, "a view must not create a record")
+
+  await added[0].execute({ compression: true, selector: "extractive" }, { sessionID: "ses_test" })
+  const state = h.store.get("session:ses_test") as AnyRecord
+  assert.deepEqual(state.decisions, ["ctx-guard: compression on, selector extractive (global)"])
+})
+
+test("config command: records a decision, preserving the other fields", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  const commands = commandCollector()
+  h.commandTransforms[0](commands.editor)
+
+  await h.hooks["execute.before"](toolEvent({ tool: "read", input: { path: "/x/y.ts" } }))
+  await commands.added[0].execute({ sessionID: "ses_test", prompt: "dedup off session" })
+
+  const state = h.store.get("session:ses_test") as AnyRecord
+  assert.deepEqual(state.decisions, ["ctx-guard: dedup off (session)"])
+  assert.deepEqual(state.activeFiles, ["/x/y.ts"], "the command write dropped activeFiles")
+})
+
+test("a failed decision record never fails the config write", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+
+  // Continuity storage fails; the config write must still land.
+  const realSet = h.ctx.storage.set
+  h.ctx.storage.set = async (key: string, value: unknown) => {
+    if (typeof key === "string" && key === "session:ses_test") throw new Error("continuity down")
+    return realSet(key, value)
+  }
+
+  const lines = await captureConsoleError(async () => {
+    const out = await added[0].execute({ compression: true }, { sessionID: "ses_test" })
+    assert.match(out.content[0].text, /compression on/)
+  })
+
+  assert.deepEqual(h.store.get("ctx-guard:config"), { compression: true }, "the config write failed")
+  assert.ok(
+    lines.some((line) => line.includes("decision record failed")),
+    `expected a logged decision failure, got ${JSON.stringify(lines)}`,
+  )
+})
+
+test("compaction: the block now renders decisions and files", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("session:ses_test", {
+    lastTask: "wire the RPC",
+    decisions: ["ctx-guard: compression on (global)"],
+    activeFiles: ["/home/oca/project/index.ts", "/home/oca/project/rpc.ts"],
+    agent: "build",
+  })
+
+  const event = contextEvent()
+  await h.hooks.compaction(event)
+  const injected = event.system[1] as AnyRecord
+
+  assert.match(injected.text, /Recent decisions:/)
+  assert.match(injected.text, /ctx-guard: compression on \(global\)/)
+  assert.match(injected.text, /Active files: .*index\.ts/)
+})
+
+test("INVARIANT: the new continuity writers never touch a request event", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  // execute.before reads event.input but must not mutate it; the prompt hook
+  // gets a fresh event; the compaction hook may only append to event.system.
+  const before = toolEvent({ tool: "read", input: { filePath: "/a/b.ts" } })
+  const beforeSnapshot = JSON.stringify(before)
+  await h.hooks["execute.before"](before)
+  assert.equal(JSON.stringify(before), beforeSnapshot, "execute.before mutated its event")
+
+  const promptEvent = { sessionID: "ses_test", agent: "build", prompt: { parts: [{ text: "hi" }] } }
+  const promptSnapshot = JSON.stringify(promptEvent)
+  await h.hooks.prompt(promptEvent as never)
+  assert.equal(JSON.stringify(promptEvent), promptSnapshot, "the prompt hook mutated its event")
+
+  const ctxEvent = contextEvent()
+  const ctxSnapshot = JSON.stringify(ctxEvent)
+  await h.hooks.context(ctxEvent)
+  assert.equal(JSON.stringify(ctxEvent), ctxSnapshot, "the context hook mutated its event")
 })
 
 // --- session.deleted prune --------------------------------------------------

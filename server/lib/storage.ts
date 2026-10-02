@@ -59,6 +59,89 @@ export async function saveContinuity(
   await storage.set(sessionKey(sessionID), state as unknown as Parameters<StorageDomain["set"]>[1])
 }
 
+// --- Deriving the continuity fields ------------------------------------------
+//
+// `decisions` and `activeFiles` are carried forward by the two write paths in
+// `index.ts`, but until 2026-10-01 nothing ever *populated* them: the block
+// rendered empty `Recent decisions:` / `Active files:` sections in every
+// session (measured: 0/51). These are the pure extractors that fill them from
+// what the plugin already observes. They take no storage, so they are
+// unit-testable without the OpenCode runtime.
+
+/** Cap on tracked active files, newest kept. */
+export const MAX_ACTIVE_FILES = 12
+
+/** Cap on tracked decisions, newest kept. */
+export const MAX_DECISIONS_STORED = 8
+
+/**
+ * Tools that touch a file path. `path` vs `filePath` is not pinned by the
+ * plugin SDK's type surface, so both are accepted rather than guessed at.
+ */
+const FILE_TOOLS: Readonly<Record<string, true>> = {
+  read: true,
+  edit: true,
+  write: true,
+  patch: true,
+  multiedit: true,
+}
+
+/** Best-effort file path from a tool input; `""` when there isn't one. */
+export function filePathOf(tool: string, input: unknown): string {
+  if (!FILE_TOOLS[tool.toLowerCase()]) return ""
+  if (!input || typeof input !== "object" || Array.isArray(input)) return ""
+  const record = input as Record<string, unknown>
+  const candidate = record.filePath ?? record.path
+  if (typeof candidate !== "string") return ""
+  const trimmed = candidate.trim()
+  return trimmed.length > 0 ? trimmed : ""
+}
+
+/**
+ * Add a file to the active set, newest last, deduped and bounded. Returns
+ * `undefined` when nothing changed, so the caller can skip the storage write.
+ */
+export function appendActiveFile(
+  existing: readonly string[],
+  file: string,
+  max: number = MAX_ACTIVE_FILES,
+): string[] | undefined {
+  if (!file) return undefined
+  if (existing.includes(file)) return undefined
+  return [...existing, file].slice(-max)
+}
+
+/**
+ * Render a config change as a one-line decision. Only *explicit* toggles count:
+ * a bare view writes nothing, so there is nothing to record for it.
+ */
+export function describeDecision(
+  patch: { compression?: boolean; dedup?: boolean; selector?: string },
+  scope: string,
+  reset = false,
+): string {
+  if (reset) return `ctx-guard config reset (${scope})`
+  const parts: string[] = []
+  if (typeof patch.compression === "boolean") {
+    parts.push(`compression ${patch.compression ? "on" : "off"}`)
+  }
+  if (typeof patch.dedup === "boolean") parts.push(`dedup ${patch.dedup ? "on" : "off"}`)
+  if (patch.selector) parts.push(`selector ${patch.selector}`)
+  if (parts.length === 0) return ""
+  return `ctx-guard: ${parts.join(", ")} (${scope})`
+}
+
+/** Append a decision, newest last, deduped and bounded. */
+export function appendDecision(
+  existing: readonly string[],
+  decision: string,
+  max: number = MAX_DECISIONS_STORED,
+): string[] | undefined {
+  if (!decision) return undefined
+  if (existing.includes(decision)) return undefined
+  return [...existing, decision].slice(-max)
+}
+
 // --- Savings ledger (per session) -------------------------------------------
 
 /** Stable storage key for a session's compression/dedup savings tally. */

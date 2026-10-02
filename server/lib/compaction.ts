@@ -34,6 +34,40 @@ export function truncate(text: string, max: number): string {
   return `${text.slice(0, max - 1).trimEnd()}…`
 }
 
+/**
+ * Best-effort user text from a `SessionPrompt.prompt` payload.
+ *
+ * The V2 prompt shape is an opaque Effect Schema (`PromptInput.Prompt`), so the
+ * field name is not pinned by the type surface. Read defensively instead of
+ * assuming: try the common carriers in order and join whatever text parts turn
+ * up. Returns `""` rather than throwing on an unrecognised shape — a failed
+ * read must not break the prompt it is observing.
+ */
+export function promptText(prompt: unknown): string {
+  if (typeof prompt === "string") return prompt
+  if (!prompt || typeof prompt !== "object") return ""
+  const record = prompt as Record<string, unknown>
+
+  for (const key of ["parts", "content"]) {
+    const value = record[key]
+    if (typeof value === "string") return value
+    if (Array.isArray(value)) {
+      const text = value
+        .map((part) => {
+          if (typeof part === "string") return part
+          if (!part || typeof part !== "object") return ""
+          const p = part as Record<string, unknown>
+          return typeof p.text === "string" ? p.text : ""
+        })
+        .join("\n")
+        .trim()
+      if (text) return text
+    }
+  }
+  if (typeof record.text === "string") return record.text
+  return ""
+}
+
 export function percent(fraction: number): string {
   if (!Number.isFinite(fraction)) return "n/a"
   return `${(fraction * 100).toFixed(1)}%`

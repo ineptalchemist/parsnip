@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { buildContinuityBlock, lastUserText, percent, truncate } from "./compaction.ts"
+import { buildContinuityBlock, lastUserText, percent, promptText, truncate } from "./compaction.ts"
 
 test("truncate: leaves short text alone, ellipsizes long text", () => {
   assert.equal(truncate("short", 10), "short")
@@ -60,4 +60,23 @@ test("buildContinuityBlock: derives the task from the last user message when sta
     messages: [{ role: "user", content: [{ type: "text", text: "fix the failing test" }] }],
   })
   assert.match(block, /Current task: fix the failing test/)
+})
+
+test("promptText: reads the common carriers defensively", () => {
+  // V2's PromptInput.Prompt is an opaque Effect Schema, so the reader tries the
+  // likely shapes rather than assuming one.
+  assert.equal(promptText("plain string"), "plain string")
+  assert.equal(promptText({ parts: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }), "a\nb")
+  assert.equal(promptText({ parts: [{ text: "solo" }] }), "solo")
+  assert.equal(promptText({ content: "from content" }), "from content")
+  assert.equal(promptText({ content: [{ text: "c1" }] }), "c1")
+  assert.equal(promptText({ text: "flat" }), "flat")
+
+  // Junk yields "" rather than throwing — a failed read must not break a prompt.
+  assert.equal(promptText(undefined), "")
+  assert.equal(promptText(null), "")
+  assert.equal(promptText(42), "")
+  assert.equal(promptText({ parts: [] }), "")
+  assert.equal(promptText({ parts: [{ type: "file" }] }), "")
+  assert.equal(promptText({ unknown: true }), "")
 })
