@@ -1,17 +1,21 @@
 # ctx-guard
 
-A cache-preserving context manager for OpenCode V2.
+A cache-preserving context manager for [OpenCode](https://opencode.ai) V2.
 
 Long sessions get expensive because the prompt grows. The usual fix is to fold
 stale history into summaries — but that rewrites the live conversation prefix and
-throws away the provider's prompt cache. `ctx-guard` takes the opposite
-approach: it never mutates the live prefix. It works only at the native
-compaction boundary and (in a later phase) on new tool output entering the
-window.
+throws away the provider's prompt cache. ctx-guard takes the opposite approach:
+**it never mutates the live prefix.** It works only at the native compaction
+boundary, and on new tool output as it enters the window.
 
-## Invariant
+Everything it drops is recoverable, and it publishes what it dropped.
 
-> The **only** surfaces allowed to alter content are:
+## Why the cache survives
+
+Prompt caching only pays off if the prefix stays byte-identical. So ctx-guard is
+built around a single rule, and the rule is narrow on purpose:
+
+> **The only surfaces allowed to alter content are:**
 > 1. the `compaction` hook (`event.system.push`), and
 > 2. `tool.hook("execute.after")` on `status: "completed"` (`event.result` only),
 >    which rewrites a result *about to be committed as new content*.
@@ -20,308 +24,270 @@ window.
 > `event.messages`, `event.system`, or `event.tools`. `event.input` in the tool
 > hooks is readonly and is never mutated.
 
-This is the whole point of the plugin. It is enforced by review, not by the
-compiler.
+Both surfaces operate on content that has not been sent to the provider yet.
+Nothing already in the conversation is ever edited, so the cached prefix stays
+intact. A regression test pins the read-only half of this.
 
-## Status: Phase 3 (structural report) + runtime config switch
+Measured across recorded sessions: **96.6% of input tokens served from cache**
+(`npm run savings`).
 
-Implemented (server side):
+## Install
 
-- **Runtime config switch** — compression, selector and dedup are toggled at
-  runtime and persist in `ctx.storage` (session override → global override →
-  default). The agent toggles via the `ctxguard_config` tool; a human via
-  `/ctx-guard`. See "Runtime config" below. Defaults: compression **OFF**,
-  dedup **ON**, selector **head-tail**.
-- **Compaction injection** — `ctx.session.hook("compaction")` pushes a
-  mode-aware continuity block (agent mode, current task, last command, recent
-  decisions, active files, last occupancy reading) into the compaction system
-  prompt. It does **not** set `event.result`, so the main model stays the
-  summarizer.
-- **Occupancy scoring** — `ctx.session.hook("context")` estimates tokens
-  (`chars / 4`) across system + messages + tools and computes occupancy against
-  the model's real context limit. Strictly read-only. This estimate is the
-  *occupancy signal only*; the authoritative token count is the usage ledger
-  below.
-- **Continuity state** — persisted per session via `ctx.storage`, so it survives
-  plugin hot reloads (module state does not).
-- **Tool-output compression** — `ctx.tool.hook("execute.after")` replaces an
-  oversized `shell`/`bash` result with a compaction of it before it is
-  committed. The method is chosen by a pluggable **selector**
-  (`server/lib/selectors.ts`); all five are pure, synchronous, and faithful
-  (the output is a verbatim subset of the input — a selector never invents
-  content). Defaults: 4000-char threshold, 1600 head, 1200 tail. Swap with
-  `ctxguard_config { selector }` or `/ctx-guard selector <name>` — the hook
-  never changes.
-
-  The **threshold** is settable too, and it moves the kept budget with it:
-  `budgetFor(minChars)` derives head as 40% and tail as 30% of the threshold.
-  That budget is always below the threshold, so the threshold is the effective
-  floor: nothing under 4000 compacts by default, and a threshold of 1500 moves
-  the floor to 1500 instead of leaving it stuck at 2800.
-  Set it with `ctxguard_config { minChars }` or `/ctx-guard threshold 1500`
-  (range 800-200000; out-of-range is rejected, not clamped). Before this the
-  budget was frozen at 2800 whatever the gate said, so any lower threshold
-  was silently inert.
-
-  **Swept, and the default left alone.** `npm run sweep` runs the corpus across
-   nine thresholds. It shows a smooth trade with no knee — each step down gains
-   ~6-10k chars on mid-sized results and costs 3-8pp of identifier retention —
-   and it concentrates the cost on the wrong corpus: the bytes *gained* are all
-   in small results, while the retention *lost* is on the large results, whose
-   budget shrinks with everything else. So `MIN_CHARS` stays 4000. The threshold
-   is an escape hatch, not a better default.
-
-  | Selector | Behaviour | Reach for it when |
-  |---|---|---|
-  | `head-tail` *(default)* | Head + tail with a counted omission marker | You want the predictable baseline |
-  | `token-budget` | Same budget, cut on token boundaries so identifiers are never split | Output is full of long identifiers you'd hate to see sliced |
-  | `log-compact` | Strips ANSI, collapses runs of identical lines (`[ctx-guard: ×N]`), then bounds with head-tail | Output is repetitive logs — best compression ratio by a wide margin |
-  | `signal-preserving` | Head + tail plus bounded middle lines matching a diagnostic pattern (errors, `file:line`, hashes, URLs) | You are reading build/test/tool output and want the failures |
-  | `extractive` | 3-line lead + tail plus the highest-scoring middle lines (position, length, signal, shape novelty) | Output is heterogeneous and you want the "interesting" lines |
-
-  Every selector's dropped text is recoverable — see the recall cache below.
-- **Duplicate suppression** — a repeated **byte-identical** large result
-  (> 1000 chars) collapses to a marker. The signature is content-addressed —
-  `tool + args + FNV-1a(output)` — so a re-run whose *output changed* never
-  matches (a re-read of a mutable file, a re-run whose log differs). Applies to
-  shell (`bash`/`shell`) and to search/retrieval tools (`websearch`,
-  `parallel_web_search`/`web_fetch`, `firecrawl_search`/`scrape`); state-query
-  tools (`read`, `grep`) are deliberately excluded. The per-session signature
-  ring lives in `ctx.storage` under `session:<id>:toolHistory`, capped at 16.
-- **Savings + fidelity ledgers** — every compression/dedup event folds its exact
-  char delta into `session:<id>:savings`, with `bySelector` breaking the
-  compression side down per method. A bounded `session:<id>:compressions` ring
-  adds one fingerprint per compression: selector, char deltas, FNV-1a hashes of
-  input/output/dropped region, and a 120-char sample of what was dropped — so
-  context loss can be attributed to a specific method. See "Measuring effects".
-- **Recall cache** — compression is lossy to the *prompt* but lossless to the
-  *system*: the full pre-compression text of every dropped result is kept in a
-  bounded `session:<id>:recall` store (1 MB / 128 entries, oldest evicted), and
-  the compressed output gains a recall note naming the id (plus the dropped-region
-  sample). The agent retrieves it with the `ctxguard_recall` tool; a human with
-  `/ctx-guard recall <id>`. This is the backstop for the fact that no selector —
-  literal or model — can know a priori what matters (see the salience eval).
-- **Real token usage** — the plugin subscribes to `session.usage.updated` and
-  writes the session's cumulative usage to `session:<id>:usage` (`input`,
-  `output`, `reasoning`, `cache.read`, `cache.write`, `cost`). This is the
-  authoritative token measurement and it replaces the `chars / 4` estimate:
-  `cache.read` is the cache-preservation signal (how much of the prompt was
-  served from cache).
-- **Structural report** — an unused/unusable MCP server + skill report computed
-  and persisted per session, with an opt-in, double-gated, `disabled: true`-only
-  prune path. Report-only by default (`STRUCTURE_PRUNE_ENABLED = false`).
-
-Not yet implemented: a TUI status display (Phase 4). A read-only `status` RPC
-exists on the unmerged `tui-footer-indicator` branch — the footer indicator it
-was built for is not merged, so the plugin ships server-side only.
-
-## Runtime config
-
-Compression, selector and dedup are runtime-toggleable and persist in
-`ctx.storage` (the `kv` table in `opencode.db`), so they survive reloads and
-restarts. Precedence: **session override → global override → default**
-(compression OFF, dedup ON, selector head-tail).
-
-- **Agent:** call the `ctxguard_config` tool —
-  `{ compression?, selector?, dedup?, session?, reset? }`. Set `session: true`
-  to scope a change to the current session only (e.g. while doing critical
-  work). It returns the resulting effective config.
-- **Human:** run `/ctx-guard compression off`, `/ctx-guard dedup on`,
-  `/ctx-guard selector head-tail`, `/ctx-guard reset [session]`. (V2 commands
-  cannot return output, so this applies silently; confirm via the
-  `ctxguard_config` tool.)
-- **Read path:** `execute.after` reads the effective config fresh each call, so
-  a toggle takes effect on the next tool call — no hot reload needed.
-
-
-## Layout
-
-```
-server/
-  index.ts              plugin entry: { id, setup } + hook wiring + tool/command
-  lib/compaction.ts     buildContinuityBlock (pure)
-  lib/config.ts         runtime compression/dedup/selector switch (persisted) + resolver
-  lib/quality.ts        token estimate + occupancy (pure)
-  lib/storage.ts        per-session continuity + savings + token usage (ctx.storage)
-  lib/selectors.ts      pluggable compression selectors (head-tail, …) (pure, leaf)
-  lib/toolhooks.ts      compression application + dedup + signatures + savings (pure)
-  lib/structure.ts      structural report + prune plan (pure)
-  *.test.ts             node:test suites (no framework)
-bench/
-  run.ts                offline ceiling benchmark (npm run bench)
-  corpus.ts             curated 8-item corpus, one per differentiating axis (compare)
-  compare.ts            cross-selector comparison: ratio + fidelity/fragment proxies
-  eval.ts               known-answer eval: planted-fact recovery per selector (npm run eval)
-  facts.ts              eval corpus: realistic outputs + planted facts
-  export-facts.ts       dump the fact corpus to JSON for the Laya probe (npm run eval:export)
-  lib/proxies.ts        pure proxies: signal/identifier/novel retention + fragments
-  lib/recovery.ts       pure known-answer recovery scoring
-  lib/laya.ts           pure Laya-scored selection (consumes a relevance map; no dependency)
-  read-savings.ts       dump per-session tokens + static/reread char savings
-  threshold.ts          sweep the compression threshold; decides the default
-  corpus.test.ts        tripwires keeping both corpora on their intended sides of the gate
-  lib/reread.ts         the reread multiplier (chars × later model calls; pure)
-```
-
-## How it loads
-
-The server plugin is auto-discovered from the plugins directory. This repo is
-symlinked into place:
-
-```
-~/.config/opencode/plugins/ctx-guard -> ~/projects/ctx-guard/server
-```
-
-No `opencode.jsonc` entry is needed. OpenCode hot-reloads plugins when a file in
-the directory is touched — no service restart required.
-
-## Development
+Requires Node 24 (the `.ts` sources run directly via built-in type stripping —
+there is no build step) and OpenCode 2.0.20+.
 
 ```bash
-npm test            # node --test 'server/**/*.test.ts' (Node strips types; no build step)
-npm run test:bench  # node --test 'bench/**/*.test.ts' (proxy + fragment tests)
-npm run bench       # offline ceiling benchmark (compression + dedup)
-npm run compare     # per-selector ratio + fidelity/fragment proxies over the corpus
-npm run eval        # known-answer recovery of planted facts, per selector
-npm run eval:export # dump the fact corpus to JSON for the out-of-process Laya probe
-npm run savings     # dump per-session savings ledgers from opencode.db (read-only)
+git clone https://github.com/ineptalchemist/ctx-guard
+npm install          # devDependency only; the plugin has zero runtime deps
 ```
 
-- Zero runtime dependencies. The only `devDependency` is `@opencode/plugin`
-  (pinned to the installed OpenCode version, currently `2.0.20`) and it is used
-  for **type-checking and API reference only** — every SDK reference in the
-  source is an `import type`, which Node strips, so nothing is resolved at
-  runtime.
-- Node 24 runs the `.ts` sources directly via built-in type stripping. Keep
-  types single-line-friendly: no multi-line nested function types inside
-  `interface` bodies, and no constructor parameter properties.
+Symlink the `server/` directory into OpenCode's plugins directory:
+
+```bash
+ln -s "$PWD/server" ~/.config/opencode/plugins/ctx-guard
+```
+
+No `opencode.jsonc` entry is needed — server plugins are auto-discovered. Editing
+a file in the directory hot-reloads the plugin, so there is no service restart.
+
+## Turning it on
+
+Both toggles persist in `ctx.storage` and survive reloads and restarts. Precedence
+is **session override → global override → default**.
+
+**Defaults: compression OFF, dedup ON, selector `head-tail`, threshold 4000.**
+
+As the agent, call the `ctxguard_config` tool:
+
+```
+ctxguard_config { compression: true }              # turn compression on
+ctxguard_config { selector: "log-compact" }        # swap the method
+ctxguard_config { minChars: 1500 }                 # lower the threshold
+ctxguard_config { compression: false, session: true }  # this session only
+ctxguard_config                                     # view; changes nothing
+```
+
+As a human, run the slash command:
+
+```
+/ctx-guard compression off
+/ctx-guard selector log-compact
+/ctx-guard threshold 1500        # or: threshold default
+/ctx-guard dedup on session
+/ctx-guard reset
+```
+
+V2 commands cannot return output, so these apply silently — confirm with the
+`ctxguard_config` tool. `execute.after` reads the effective config fresh on every
+call, so a toggle takes effect on the next tool call with no hot reload.
+
+### The threshold
+
+`minChars` sets both the gate **and** how much is kept: 40% from the front, 30%
+from the back. Range 800–200000; an out-of-range value is rejected rather than
+clamped. Because the budget always sits below the gate, the threshold is the
+effective floor — nothing under it compacts.
+
+The default stays at 4000 because sweeping lower costs more than it saves on the
+results that matter. It is an escape hatch, not a better default; see
+[NOTES.md](./NOTES.md) for the sweep.
+
+## What it does
+
+| Surface | What happens | Writes |
+|---|---|---|
+| `session.hook("compaction")` | Pushes a continuity block — agent mode, current task, last command, recent decisions, active files, last occupancy — into the compaction system prompt. Does **not** set `event.result`, so the main model stays the summarizer. | transcript (allowed) |
+| `session.hook("context")` | Resolves the model's real context limit, estimates tokens, records an occupancy reading, refreshes the structure report. Strictly read-only. | storage |
+| `session.hook("prompt")` | Records the current task. | storage |
+| `tool.hook("execute.before")` | Records the last command (shell) or the active file (file tools), and tool/skill usage. `event.input` is never mutated. | storage |
+| `tool.hook("execute.after")` | Deduplicates, then compresses, an oversized result before it is committed. The only mutating surface. | transcript (allowed) |
+| `ctx.event.subscribe` | Captures real token usage from `session.usage.updated`; prunes a deleted session's storage keys. | storage |
+| `mcp` / `skill` / `tool` / `command` transforms | Observe catalogs; inject the two agent tools and the slash command. | config |
+
+Every other hook writes only to `ctx.storage`.
+
+## Compression
+
+Applies to shell (`bash`/`shell`) and search/retrieval tools (`websearch`,
+`web_fetch`, `firecrawl_*`) over the threshold. All selectors are pure,
+synchronous, and **faithful**: the output is a verbatim subset of the input — a
+selector never invents content, only drops and adds delimited `[ctx-guard: …]`
+markers carrying counts.
+
+| Selector | Behaviour | Reach for it when |
+|---|---|---|
+| `head-tail` *(default)* | Head + tail with a counted omission marker | You want the predictable baseline |
+| `token-budget` | Same budget, cut on token boundaries so identifiers are never split | Output is full of long identifiers you'd hate to see sliced |
+| `log-compact` | Strips ANSI, collapses runs of identical lines (`[ctx-guard: ×N]`), then bounds with head-tail | Output is repetitive logs — best ratio by a wide margin |
+| `signal-preserving` | Head + tail plus bounded middle lines matching a diagnostic pattern (errors, `file:line`, hashes, URLs) | You are reading build/test output and want the failures |
+| `extractive` | 3-line lead + tail plus the highest-scoring middle lines (position, length, signal, shape novelty) | Output is heterogeneous and you want the "interesting" lines |
+
+Every selector's dropped text is recoverable — see the recall cache below.
+
+## Duplicate suppression
+
+A repeated **byte-identical** large result (> 1000 chars) collapses to a marker.
+The signature is content-addressed — `tool + args + FNV-1a(output)` — so a re-run
+whose *output changed* never matches, which is the freshness hazard an args-only
+key would create. Applies to shell and search/retrieval tools; state-query tools
+(`read`, `grep`) are deliberately excluded. The per-session ring holds 16
+signatures.
+
+## Nothing dropped is unrecoverable
+
+Compression is lossy to the **prompt** but lossless to the **system**.
+
+The full pre-compression text of every dropped result is kept in a bounded
+per-session store (1 MB / 128 entries, oldest evicted first), and the compressed
+output gains a note naming the id:
+
+```
+[ctx-guard: full text dropped — recall ctxguard_recall("recall-3") — …]
+```
+
+The agent retrieves it with the `ctxguard_recall` tool. A human can use
+`/ctx-guard recall <id>`, which only logs the size — V2 commands cannot return
+output, so the tool is the real retrieval path.
+
+This is the backstop for a hard limit: **no selector can know a priori which part
+of a result matters.** The known-answer eval confirms it — on facts with no
+shallow feature (no error keyword, no unique shape), *every* approach recovers
+0%. If selection is that unreliable in the general case, recovery has to be a
+guarantee rather than a hope.
+
+Dedup is not in this store: the original is already in context from the first
+occurrence.
 
 ## Measuring effects
 
 ### Live, per session
 
-Three ledgers are recorded in `ctx.storage`, and they measure different things.
+`npm run savings` reads `opencode.db` directly (plugin console output does not
+reach the log) and prints three things per session:
 
-1. **Real token usage (measured):** the plugin subscribes to
-   `session.usage.updated` and stores the session's cumulative usage at
-   `session:<id>:usage` — `input` (fresh, uncached), `output`, `reasoning`, and
-   `cache.read` / `cache.write`. Total prompt input is
-   `input + cache.read + cache.write`, and
-   `cache.read / (input + cache.read + cache.write)` is the cache-preservation
-   signal: a high ratio means the live prefix stayed cached. This is *measured
-   provider usage*, not an estimate.
-2. **Characters removed by the transforms (exact):** every
-   compression/dedup folds its exact char delta into `session:<id>:savings`
-   (`compressions`/`charsOmitted`, `dedups`/`charsDeduped`). For a compression
-   the delta is `original - compressed`; for a dedup it is
-   `original - marker.length`. These are **characters, not tokens** — they are
-   never converted. `bySelector` breaks the compression side down per method
-   (`compressions`/`charsOmitted`/`charsKept`), so methods compare directly.
-3. **What each method dropped (per event):** a bounded
-   `session:<id>:compressions` ring (cap 64) holds one record per compression —
-   `selector`, `tool`, char deltas, FNV-1a `inputHash`/`outputHash`/`omittedHash`,
-   and a 120-char `omittedSample`. `omittedHash` is the replay key: an external
-   eval can ask "did dropping exactly this region break a known-answer query?"
-   and attribute a failure to a selector. The dropped region is reconstructed
-   from the longest common prefix/suffix of input and output — exact for
-   `head-tail`, best-effort for reordering selectors.
+1. **Real token usage** — measured provider usage from `session.usage.updated`.
+   Total prompt input is `input + cache.read + cache.write`; the
+   `cache.read / total` ratio is the cache-preservation signal.
+2. **Static chars removed** — the exact character delta each compression/dedup
+   removed from the transcript, broken down per selector. Characters, not tokens;
+   never converted.
+3. **Reread chars** — see below.
+
+Also recorded per compression, in a bounded ring: the selector, char deltas,
+FNV-1a hashes of input/output/dropped region, and a 120-char sample of what was
+dropped. The `omittedHash` is a replay key, so an external eval can ask "did
+dropping exactly this region break a known-answer query?" and attribute the
+failure to a specific method.
+
+### Static vs reread
+
+Two char figures are reported because they measure different things:
+
+- **static** — characters removed from the transcript *once*.
+- **reread** — characters then **never re-transmitted**. Every model call re-sends
+  the whole prompt, and the prompt is now permanently shorter, so each removed
+  character would otherwise have been paid for on every later call.
+
+The multiplier between them (chars ÷ chars, so no token guess is involved) is the
+honest measure of the effect. Across all recorded sessions at the time of writing
+it runs **~109x** — a compression made early in a session is worth many times one
+made at the end, which the static figure alone cannot show.
+
+Computed from per-compression timestamps plus the session's assistant-message
+timeline. An assistant message with K tool parts counts as K+1 invocations, so the
+figure is a **lower bound**. Dedup is excluded — only an aggregate is stored, with
+no per-event timestamps to weight — so it contributes to static alone.
 
 ### Offline, deterministic
 
-These run against `bench/` corpora rather than your sessions. They are how the
-selectors were compared before any of them ran in anger — and how the limits
-below were found.
+| Command | Question it answers |
+|---|---|
+| `npm run bench` | Mechanism ceiling: how much could compression/dedup save on realistic shell output? |
+| `npm run compare` | Selector comparison over a curated corpus — ratio, content-retention proxies, fragment count |
+| `npm run sweep` | Threshold sweep across nine settings; decides the default |
+| `npm run eval` | Known-answer recovery of planted facts, per selector, by salience class |
 
-4. **Mechanism ceiling:** `npm run bench` pushes a realistic shell-output corpus
-   through the pure `compressText` / dedup functions — a ~95% ceiling on the
-   sample corpus.
-5. **Selector comparison + fidelity proxies:** `npm run compare` pushes the
-   curated corpus (`bench/corpus.ts`) through all five selectors and reports, per
-   selector: ratio, uncalibrated ~tokens, four content-retention proxies — signal
-   lines, identifiers, novel lines (exact and shape) — and a **fragment count**
-   (identifiers the output emits cut mid-token; lower is better, 0 = every
-   emitted identifier is whole). Retention cannot separate `head-tail` from
-   `token-budget` — both keep the same char budget and a cut fragment never
-   counts as retained — while the fragment proxy can: **9 vs 2** fragments over
-   the corpus, `token-budget`'s 2 being the no-boundary fallback case only. The
-   proxies compare *visible* text (ANSI stripped, so `log-compact`'s ANSI strip is
-   not scored as lost content); ratios and token counts stay on the raw bytes.
-6. **Known-answer recovery, by salience class:** `npm run eval` plants facts in
-   realistic outputs and scores **literal recovery** per selector, grouped by
-   **salience** — the shallow feature a selector could use to find a fact,
-   *computed* (not hand-tagged) via the exported `SIGNAL_PATTERN` / `lineShape`:
-   - `positional` (head/tail): ~100% for every selector (control).
-   - `signal` (`SIGNAL_PATTERN`): `signal-preserving` 75%, `extractive` 75%,
-     Laya 75%; positional selectors 0%.
-   - `shape-novel` (unique `lineShape`): **`extractive` 100% — its own
-     `novelty = 1/shapeCount` term, by construction**; everyone else 0% (Laya 45%).
-   - `value` (no shallow feature — the hard class): **0% for every arm**,
-     Laya included (one coincidental `log-compact` hit).
-   Net: each "smart" selector wins exactly its own feature class *by
-   construction*; **no** selector — literal or model — recovers non-salient
-   content. This is why the earlier "extractive 93%" was circular, and it is now
-   retired.
-7. **Model-graded tier (optional):** given a Laya relevance map
-   (`laya.json`, produced by a scratch Python probe over `npm run eval:export`
-   output — Laya is out-of-process; no dependency), `npm run eval` adds a `laya`
-   arm that keeps head + tail plus the middle lines Laya judged relevant.
-   **Result (2026-10-01).** Question framing is the lever: a vague `noul` scores
-   20% salient-class middle recovery, and a graded `score` rubric lifts it to
-   **53%** (the fine-tuned `typed-decisions` head gives 47%, no better). That
-   sits below `extractive`'s 93% **only on the salient class — a circular
-   comparison (see item 6)**; on the non-circular **`value`** class (no shallow
-   feature) Laya and `extractive` are **tied at 0%**. Laya's per-line ranking stays
-   bimodal (git-diff facts #91-93/93). So the residual gap is the model, not the
-   arm.
-   (The load warning about "uncalibrated temperatures" is the shipped `choice:11+`
-   bucket, which the `noul`/`score` questions don't use.) Details in Basic Memory.
+Selectors were compared this way before any ran in anger.
 
-`npm run savings` prints both live ledgers. It reads `opencode.db` directly
-because plugin `console.log`/`console.error` does *not* reach `opencode.log`.
-The old `~chars / 4` "token estimate" was an uncalibrated guess and has been
-removed in favour of the measured `session.usage.updated` numbers.
+Retention proxies cannot separate `head-tail` from `token-budget` — both keep the
+same budget, and a cut fragment never counts as retained. The fragment proxy can,
+and does: **9 vs 2** fragments over the corpus, `token-budget`'s 2 being the
+no-boundary fallback case only.
 
-### Static vs reread — why the two char numbers differ
+The proxies compare *visible* text (ANSI stripped, so `log-compact`'s ANSI strip
+is not scored as lost content); ratios stay on raw bytes. They are retention
+proxies, not a fidelity verdict — a threshold that holds every identifier while
+destroying the argument connecting them scores well. Read them as a floor on
+damage.
 
-Each session reports two char figures, and they measure different things:
+## Operational notes
 
-- **`static`** — characters removed from the transcript *once*.
-- **`reread`** — characters that were then **never re-transmitted**. Every model
-  call re-sends the whole prompt, and the prompt is now permanently shorter, so
-  each removed character would otherwise have been paid for on every later call.
-  A compression made early is worth many times one made at the end.
+- **Read before judging the numbers.** Native `tool_output` truncation
+  (`max_lines: 500` / `max_bytes: 20000`) runs *before* `execute.after`, so
+  compression only earns its keep on results that are long but **few-lined** —
+  diffs, minified JSON, long single log lines. Duplicates are caught either way.
+  The savings ledger is how you tell whether that actually happens in your
+  sessions.
+- **Prefer `read` over shell for file content.** `read` is not a compression
+  target; `cat` / `grep` / `sed` / `head` are shell output and get compressed.
+  Use shell to *compute over* bulk data, not to display it.
+- **Recall when you see a marker you did not expect**, before answering from the
+  compressed text.
+- Do not disable native auto-compaction — this plugin is designed to work with it.
+- `file` content parts, `result.output`, and `result.metadata` are never touched.
+  Only text content is rewritten.
+- The `chars / 4` heuristic in `lib/quality.ts` is an **occupancy estimate only**,
+  used for the `Context occupancy` line in the continuity block. It is not the
+  plugin's token measurement.
+- The structure report (unused/unusable MCP servers and skills) is report-only.
+  The prune path is off by default, double-gated, and only ever sets
+  `disabled: true` — never removes an entry, since removal would lose
+  `command`/`url`/`oauth`.
 
-The multiplier between them (`chars ÷ chars`, so no token guess is involved) is
-the honest measure of the plugin's effect, and it runs **well above 1x** —
-currently ~90x across all recorded sessions, i.e. the static figure understates
-the real saving by roughly two orders of magnitude.
+## Development
 
-Computed in `bench/lib/reread.ts` from the per-compression timestamps in
-`session:<id>:compressions` and the session's assistant-message timeline in
-`session_message`. An assistant message with K tool parts counts as K+1
-invocations, so the figure is a **lower bound**. Dedup is excluded — only an
-aggregate is stored, with no per-event timestamps to weight — so it contributes
-to `static` alone.
+```bash
+npm test            # node --test 'server/**/*.test.ts'
+npm run test:bench  # node --test 'bench/**/*.test.ts'
+```
 
-**Read this before judging the savings numbers:** native `tool_output`
-truncation (`max_lines: 500` / `max_bytes: 20 000`) runs *before*
-`execute.after`, so compression only earns its keep on results that are long but
-**few-lined** (diffs, minified JSON, long single log lines). Duplicates are
-caught either way. The savings ledger is the way to tell whether that actually
-happens in your sessions.
+Everything else is a harness — see "Measuring effects".
 
-## Notes
+Zero runtime dependencies. The only `devDependency` is `@opencode/plugin`, pinned
+to the installed OpenCode version, and used for **types only** — every SDK
+reference in the source is an `import type`, which Node strips.
 
-- The `chars / 4` heuristic in `lib/quality.ts` is an **occupancy estimate only**
-  — it drives the `Context occupancy` line in the continuity block. It is not
-  the plugin's token measurement: real provider usage is captured from
-  `session.usage.updated` (see "Real token usage" above), and that is what
-  `npm run savings` reports.
-- Do not disable native auto-compaction — this plugin is designed to work with
-  it.
-- `file` content parts, `result.output`, and `result.metadata` are never
-  touched — only text content is rewritten.
-- The tool-hook events are `execute.before` (read-only; records the last command
-  for continuity, and tool/skill usage for the structural report) and
-  `execute.after` (the only mutating one).
+Node 24 runs the `.ts` sources directly. Keep types single-line-friendly: no
+multi-line nested function types inside `interface` bodies, and no constructor
+parameter properties.
 
+```
+server/
+  index.ts              plugin entry: { id, setup } + hook wiring + tool/command
+  lib/selectors.ts      pluggable compression selectors (pure, leaf)
+  lib/toolhooks.ts      result handling + dedup + savings/fidelity/recall (pure)
+  lib/config.ts         persisted runtime config + resolver
+  lib/compaction.ts     continuity block rendering (pure, leaf)
+  lib/structure.ts      structural report + prune plan (pure)
+  lib/storage.ts        per-session continuity + savings + token usage
+  lib/quality.ts        token estimate + occupancy (pure, leaf)
+  *.test.ts             node:test suites (no framework)
+bench/
+  run.ts                offline ceiling benchmark
+  corpus.ts             curated 8-item corpus, one per differentiating axis
+  compare.ts            cross-selector comparison
+  threshold.ts          threshold sweep; decides the default
+  eval.ts               known-answer eval: planted-fact recovery per selector
+  facts.ts              eval corpus: realistic outputs + planted facts
+  export-facts.ts       dump the fact corpus to JSON for the relevance probe
+  read-savings.ts       dump per-session tokens + static/reread savings
+  lib/metrics.ts        shared metrics for compare + sweep
+  lib/proxies.ts        retention proxies + fragment detection
+  lib/recovery.ts       known-answer recovery + salience classification
+  lib/reread.ts         the reread multiplier (pure)
+  lib/laya.ts           relevance-scored selection (consumes a map; no dependency)
+  *.test.ts             proxy / recovery / reread tests
+```
+
+Development history, the threshold analysis, the salience finding, and known gaps
+are in [NOTES.md](./NOTES.md).
