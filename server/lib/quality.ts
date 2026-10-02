@@ -4,9 +4,15 @@
  * No OpenCode imports and no side effects — everything here is unit-testable
  * under `node --test` without the OpenCode runtime.
  *
- * The `chars / 4` heuristic is deliberately crude. It is good enough to drive
- * a relative occupancy signal, but it must be calibrated against real provider
- * usage before the status line is trusted.
+ * The `chars / 4` heuristic is deliberately crude, and it is NOT the plugin's
+ * token measurement. Real provider usage is captured from the
+ * `session.usage.updated` event and stored per session (see `tokenUsageFrom` in
+ * `./storage.ts`); that ledger — not this function — is what `npm run savings`
+ * reports and what the cache-preservation signal is read from.
+ *
+ * What this estimate is for: the *occupancy* reading shown in the compaction
+ * continuity block, where a cheap relative number is enough. It is an estimate
+ * by design; do not treat it as a token count.
  */
 
 /** Heuristic token estimate: ~4 characters per token. */

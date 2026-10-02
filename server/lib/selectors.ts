@@ -366,6 +366,27 @@ export function lineShape(line: string): string {
 /**
  * Deterministic keep-score: end-of-text position bias + length band + signal +
  * novelty. `shapeCount` is how many lines share this line's shape (1 = unique).
+ *
+ * The four terms, and why each is weighted the way it is:
+ *
+ *  - `position` — the closer a line is to either end, the higher it scores
+ *    (`1 / (1 + distance / leadBias)`). The ends of a log or diff carry the
+ *    framing; the exact middle is the likeliest place for noise. Taking the max
+ *    of the two ends means "near *either* end" scores well, not just the head.
+ *  - `lengthScore` — a band, not a monotonic bonus. Very short lines are often
+ *    separators or `}` noise (0.3); a normal-sized line is the useful default
+ *    (1); a very long line is usually a minified blob or a stack dump (0.5).
+ *  - `signal` — flat bonus for matching `SIGNAL_PATTERN` (errors, file:line,
+ *    hashes). Same bonus as `signal-preserving` uses to rescue lines outright.
+ *  - `novelty` — `noveltyWeight / shapeCount`, so a shape appearing once scores
+ *    the full weight and a shape repeated 50 times scores 1/50 of it. This is
+ *    the term that lets the selector find content with no shallow signal, and
+ *    also the one that makes the known-answer eval circular on the
+ *    `shape-novel` class: it wins that class by construction (see the README's
+ *    salience section). Do not read its eval score as evidence of general
+ *    value-preservation.
+ *
+ * Scores only *select*; output order is always original order.
  */
 export function scoreLine(
   line: string,
@@ -376,13 +397,16 @@ export function scoreLine(
 ): number {
   const fromStart = index
   const fromEnd = total - 1 - index
+  // Near either end scores high; the middle decays.
   const position = Math.max(
     1 / (1 + fromStart / o.leadBias),
     1 / (1 + fromEnd / o.leadBias),
   )
   const length = line.length
+  // Too short = separator noise; normal = default; too long = blob.
   const lengthScore = length < 20 ? 0.3 : length <= 200 ? 1 : 0.5
   const signal = SIGNAL_PATTERN.test(line) ? o.signalWeight : 0
+  // Rare shapes score high; ubiquitous shapes are pushed toward zero.
   const novelty = o.noveltyWeight / Math.max(1, shapeCount)
   return position + lengthScore + signal + novelty
 }
