@@ -43,7 +43,7 @@ function makeStorage() {
 const servers: ServerEntry[] = [
   { name: "basic-memory", type: "local", disabled: false, status: "connected" },
   { name: "firecrawl", type: "remote", disabled: false, status: "connected" },
-  { name: "filterboy", type: "local", disabled: false, status: "failed" },
+  { name: "taproot", type: "local", disabled: false, status: "failed" },
   { name: "n8n", type: "remote", disabled: false, status: "needs_auth" },
   { name: "parallel", type: "remote", disabled: true, status: "disabled" },
 ]
@@ -98,7 +98,7 @@ test("classifyServers: failed / needs_auth are unusable", () => {
   const report = classifyServers(servers, new Set())
   const byName = new Map(report.map((server) => [server.name, server]))
 
-  assert.equal(byName.get("filterboy")?.unusable, true)
+  assert.equal(byName.get("taproot")?.unusable, true)
   assert.equal(byName.get("n8n")?.unusable, true)
   assert.equal(byName.get("firecrawl")?.unusable, false)
   // A connected server is never unusable, used or not.
@@ -169,7 +169,7 @@ test("computeReport: defaults to dead weight only (unused or unusable)", () => {
 
   assert.deepEqual(
     report.servers.map((server) => server.name),
-    ["firecrawl", "filterboy", "n8n", "parallel"],
+    ["firecrawl", "taproot", "n8n", "parallel"],
   )
   assert.deepEqual(
     report.skills.map((skill) => skill.id),
@@ -204,7 +204,7 @@ test("buildPrunePlan: unusable servers only, used/healthy servers excluded", () 
     unusedServers: false,
     unusedSkills: false,
   })
-  assert.deepEqual(plan.servers, ["filterboy", "n8n"])
+  assert.deepEqual(plan.servers, ["taproot", "n8n"])
   assert.deepEqual(plan.skills, [])
 })
 
@@ -214,8 +214,10 @@ test("buildPrunePlan: unused servers are added only with that option", () => {
     unusedServers: true,
     unusedSkills: false,
   })
-  // basic-memory/filterboy/n8n/parallel are unused; firecrawl is used in this report.
-  assert.deepEqual(plan.servers.sort(), ["basic-memory", "filterboy", "n8n", "parallel"])
+  // basic-memory/taproot/n8n/parallel are unused; firecrawl is used in this report.
+  // The expected list is pre-sorted: "taproot" sorts after "parallel", which is
+  // why it cannot simply sit where "filterboy" used to.
+  assert.deepEqual(plan.servers.sort(), ["basic-memory", "n8n", "parallel", "taproot"])
 })
 
 test("buildPrunePlan: unused skills need an explicit opt-in", () => {
@@ -255,17 +257,17 @@ function makeEditor(entries: Array<[string, { disabled?: boolean }]>) {
 
 test("applyPrunePlan: sets disabled: true and records a before/after diff", () => {
   const editor = makeEditor([
-    ["filterboy", { disabled: false }],
+    ["taproot", { disabled: false }],
     ["n8n", {}],
   ])
 
-  const diff = applyPrunePlan(editor, { servers: ["filterboy", "n8n"], skills: [] })
+  const diff = applyPrunePlan(editor, { servers: ["taproot", "n8n"], skills: [] })
 
-  assert.deepEqual(editor.calls, ["filterboy", "n8n"])
-  assert.equal(editor.map.get("filterboy")?.disabled, true)
+  assert.deepEqual(editor.calls, ["taproot", "n8n"])
+  assert.equal(editor.map.get("taproot")?.disabled, true)
   assert.equal(editor.map.get("n8n")?.disabled, true)
   assert.deepEqual(diff.changes, [
-    { kind: "server", name: "filterboy", before: { disabled: false }, after: { disabled: true } },
+    { kind: "server", name: "taproot", before: { disabled: false }, after: { disabled: true } },
     { kind: "server", name: "n8n", before: { disabled: false }, after: { disabled: true } },
   ])
   assert.deepEqual(diff.skipped, [])
@@ -273,19 +275,19 @@ test("applyPrunePlan: sets disabled: true and records a before/after diff", () =
 })
 
 test("applyPrunePlan: skips names the editor does not know (never throws)", () => {
-  const editor = makeEditor([["filterboy", {}]])
-  const diff = applyPrunePlan(editor, { servers: ["filterboy", "ghost"], skills: [] })
+  const editor = makeEditor([["taproot", {}]])
+  const diff = applyPrunePlan(editor, { servers: ["taproot", "ghost"], skills: [] })
 
-  assert.deepEqual(editor.calls, ["filterboy"])
+  assert.deepEqual(editor.calls, ["taproot"])
   assert.deepEqual(diff.skipped, ["ghost"])
 })
 
 test("applyPrunePlan: an empty plan touches nothing", () => {
-  const editor = makeEditor([["filterboy", {}]])
+  const editor = makeEditor([["taproot", {}]])
   const diff = applyPrunePlan(editor, { servers: [], skills: ["opencode"] })
   assert.deepEqual(editor.calls, [])
   assert.deepEqual(diff.changes, [])
-  assert.deepEqual(editor.map.get("filterboy"), {})
+  assert.deepEqual(editor.map.get("taproot"), {})
 })
 
 // --- usage helpers ----------------------------------------------------------

@@ -1,7 +1,7 @@
 /**
  * Laya-scored selection — the offline "model-graded" path for the eval harness.
  *
- * Laya (filterboy's local router) is a Python + torch classifier that cannot
+ * Laya (taproot's local router) is a Python + torch classifier that cannot
  * live in this zero-dep TS plugin. So the model runs out-of-process (a scratch
  * probe) and writes a `laya.json` relevance map; this module consumes that with
  * pure TS and turns it into a *faithful* compaction, comparable to the built-in

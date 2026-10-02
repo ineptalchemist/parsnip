@@ -646,7 +646,7 @@ function seedCatalog(h: ReturnType<typeof makeHarness>) {
   h.mcpServers.push(
     { name: "basic-memory", status: { status: "connected" } },
     { name: "firecrawl", status: { status: "connected" } },
-    { name: "filterboy", status: { status: "failed", error: "spawn failed" } },
+    { name: "taproot", status: { status: "failed", error: "spawn failed" } },
     { name: "n8n", status: { status: "failed", error: "unreachable" } },
     { name: "parallel", status: { status: "connected" } },
   )
@@ -662,7 +662,7 @@ test("mcp/skill transforms snapshot the catalog read-only", async () => {
 
   const { map, removed, editor } = mcpEditor([
     ["basic-memory", { type: "local", command: ["basic-memory", "mcp"] }],
-    ["filterboy", { type: "local", command: ["filterboy-mcp"] }],
+    ["taproot", { type: "local", command: ["taproot-mcp"] }],
     ["parallel", { type: "remote", url: "https://search.parallel.ai/mcp", oauth: false }],
   ])
   h.mcpTransforms[0](editor)
@@ -684,7 +684,7 @@ test("context hook: persists the structure report with real usage and status", a
   h.mcpTransforms[0](
     mcpEditor([
       ["basic-memory", { type: "local" }],
-      ["filterboy", { type: "local" }],
+      ["taproot", { type: "local" }],
       ["parallel", { type: "remote", url: "x" }],
     ]).editor,
   )
@@ -707,12 +707,12 @@ test("context hook: persists the structure report with real usage and status", a
 
   const names = report.servers.map((server: AnyRecord) => server.name)
   assert.ok(!names.includes("basic-memory"), "a used server must drop out of the report")
-  assert.ok(names.includes("filterboy"), "an unusable server must be reported")
+  assert.ok(names.includes("taproot"), "an unusable server must be reported")
 
-  const filterboy = report.servers.find((server: AnyRecord) => server.name === "filterboy")
-  assert.equal(filterboy.unusable, true)
-  assert.equal(filterboy.status, "failed")
-  assert.equal(filterboy.used, false)
+  const taproot = report.servers.find((server: AnyRecord) => server.name === "taproot")
+  assert.equal(taproot.unusable, true)
+  assert.equal(taproot.status, "failed")
+  assert.equal(taproot.used, false)
 
   assert.deepEqual(
     report.skills.map((skill: AnyRecord) => skill.id),
@@ -749,7 +749,7 @@ test("prune path stays inert without the owner's approval flag", async () => {
   await ctxGuard.setup(h.ctx)
 
   const { map, removed, editor } = mcpEditor([
-    ["filterboy", { type: "local" }],
+    ["taproot", { type: "local" }],
     ["n8n", { type: "remote", url: "x" }],
   ])
   h.mcpTransforms[0](editor)

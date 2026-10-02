@@ -16,7 +16,7 @@
  * "Unused" is scoped per session and is an honest-but-weak signal:
  *  - MCP server unused = no tool call belonging to it was seen in this session.
  *  - MCP server unusable = the runtime reports `failed` or `needs_auth`. This is
- *    the strong, useful signal (observed live: `filterboy` failed to spawn,
+ *    the strong, useful signal (observed live: `taproot` failed to spawn,
  *    `n8n` unreachable).
  *  - Skill unused = not `autoinvoke` and never observed through the `skill`
  *    tool. The skill catalog surfaced by the SDK is *incomplete* (verified live
