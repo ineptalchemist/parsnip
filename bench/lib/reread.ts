@@ -1,5 +1,5 @@
 /**
- * The reread multiplier: how much of ctx-guard's apparent saving is invisible
+ * The reread multiplier: how much of parsnip's apparent saving is invisible
  * in the static ledger.
  *
  * The static figure counts characters removed from the transcript once. But a

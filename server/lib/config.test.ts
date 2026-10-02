@@ -36,8 +36,8 @@ test("DEFAULT_CONFIG: compression off, dedup on, selector head-tail", () => {
 })
 
 test("sessionConfigKey: namespaces by session", () => {
-  assert.equal(sessionConfigKey("ses_1"), "session:ses_1:ctx-guard")
-  assert.equal(GLOBAL_CONFIG_KEY, "ctx-guard:config")
+  assert.equal(sessionConfigKey("ses_1"), "session:ses_1:parsnip")
+  assert.equal(GLOBAL_CONFIG_KEY, "parsnip:config")
 })
 
 test("resolveConfig: session override beats global beats default", () => {

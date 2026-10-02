@@ -1,11 +1,11 @@
 /**
- * Read ctx-guard's per-session measurements out of OpenCode's plugin storage.
+ * Read parsnip's per-session measurements out of OpenCode's plugin storage.
  *
  * Two ledgers are shown, and they measure DIFFERENT things:
  *  - tokens: REAL provider usage from the `session.usage.updated` event
  *    (cumulative per session). `cache read` is the cache-preservation signal:
  *    a high cacheRead/input ratio means the live prefix was not invalidated.
- *  - chars: exact characters removed by ctx-guard's tool-output compression and
+ *  - chars: exact characters removed by parsnip's tool-output compression and
  *    dedup. This is prompt-growth reduction, NOT tokens — it is never converted
  *    to a token count (the old `chars / 4` figure was an uncalibrated guess).
  *
@@ -139,7 +139,7 @@ for (const msg of messages) {
 const sessions = [...new Set([...tokens.keys(), ...chars.keys()])].sort()
 
 if (sessions.length === 0) {
-  console.log("no ctx-guard ledgers found")
+  console.log("no parsnip ledgers found")
   process.exit(0)
 }
 

@@ -174,7 +174,7 @@ function skillEditor(entries: AnyRecord[] = []) {
         if (info) update(info)
       },
       remove: () => {
-        throw new Error("ctx-guard must never remove a skill")
+        throw new Error("parsnip must never remove a skill")
       },
     },
   }
@@ -281,7 +281,7 @@ test("compaction hook: injects the continuity block but does not own the summary
   assert.equal(event.system.length, 2, "expected exactly one injected system part")
   const injected = event.system[1]
   assert.equal(injected.type, "text")
-  assert.match(injected.text, /\[ctx-guard continuity\]/)
+  assert.match(injected.text, /\[parsnip continuity\]/)
   assert.match(injected.text, /Current task: wire the compaction hook/)
   assert.match(injected.text, /keep context read-only/)
   assert.match(injected.text, /Active files: server\/index\.ts/)
@@ -342,15 +342,15 @@ test("execute.after: passes a large shell result through when compression is off
 test("execute.after: compresses a large shell result when enabled via config", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true })
 
   const event = toolEvent()
   const outputRef = event.result.output
   await h.hooks["execute.after"](event)
 
   const text = (event.result.content as Array<AnyRecord>)[0].text
-  assert.match(text, /\[ctx-guard: \d+ chars omitted\]/)
-  assert.match(text, /ctxguard_recall\("recall-\d+"\)/, "the recall note is appended")
+  assert.match(text, /\[parsnip: \d+ chars omitted\]/)
+  assert.match(text, /parsnip_recall\("recall-\d+"\)/, "the recall note is appended")
   assert.ok(text.length < 3200, `expected a bounded placeholder, got ${text.length} chars`)
   assert.equal(text.slice(0, 1600), "x".repeat(1600))
   assert.ok(text.includes("x".repeat(1200)), "the tail survives (before the recall note)")
@@ -487,7 +487,7 @@ test("execute.after: a repeated identical large search result is suppressed", as
 test("execute.after: compression savings are recorded when enabled", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true })
 
   await h.hooks["execute.after"](toolEvent())
 
@@ -505,7 +505,7 @@ test("execute.after: compression savings are recorded when enabled", async () =>
 test("execute.after: logs a parseable savings line per event", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true })
 
   const lines: string[] = []
   const original = console.error
@@ -520,9 +520,9 @@ test("execute.after: logs a parseable savings line per event", async () => {
   const joined = lines.join("\n")
   assert.match(
     joined,
-    /\[ctx-guard\] savings session=ses_test selector=head-tail event=compress chars=\d+/,
+    /\[parsnip\] savings session=ses_test selector=head-tail event=compress chars=\d+/,
   )
-  assert.match(joined, /\[ctx-guard\] savings session=ses_test event=dedup chars=\d+/)
+  assert.match(joined, /\[parsnip\] savings session=ses_test event=dedup chars=\d+/)
 })
 
 test("execute.before: records the last command without mutating input", async () => {
@@ -571,7 +571,7 @@ test("setup wiring: one failing registration cannot break the plugin load", asyn
     await ctxGuard.setup(h.ctx) // must not throw
   })
 
-  assert.match(lines.join("\n"), /\[ctx-guard\] mcp\.transform registration failed \(skipped\)/)
+  assert.match(lines.join("\n"), /\[parsnip\] mcp\.transform registration failed \(skipped\)/)
   // Everything else still registered.
   assert.equal(typeof h.hooks.context, "function")
   assert.equal(typeof h.hooks["execute.before"], "function")
@@ -593,7 +593,7 @@ test("guarded: a throwing body never rejects and is logged", async () => {
   })
 
   assert.equal(lines.length, 1)
-  assert.match(lines[0], /\[ctx-guard\] test\.hook failed \(ignored\)/)
+  assert.match(lines[0], /\[parsnip\] test\.hook failed \(ignored\)/)
   assert.match(lines[0], /kaboom/)
 })
 
@@ -638,7 +638,7 @@ test("setup wiring: a hook whose storage throws cannot break the session", async
 
   assert.equal(JSON.stringify(event), snapshot, "a failed hook must not touch the event")
   assert.ok(lines.length >= 3, `expected every hook to log its failure, got ${lines.length}`)
-  assert.ok(lines.every((line) => line.includes("[ctx-guard]")))
+  assert.ok(lines.every((line) => line.includes("[parsnip]")))
 })
 
 // --- Phase 3: structural report --------------------------------------------
@@ -775,14 +775,14 @@ test("setup registers the config + recall tools and a config command", async () 
   h.toolTransforms[0](editor)
   assert.deepEqual(
     added.map((t) => t.name).sort(),
-    ["ctxguard_config", "ctxguard_recall"],
+    ["parsnip_config", "parsnip_recall"],
   )
   for (const tool of added) assert.equal(typeof tool.execute, "function")
 
   const commands = commandCollector()
   h.commandTransforms[0](commands.editor)
   assert.equal(commands.added.length, 1)
-  assert.equal(commands.added[0].name, "ctx-guard")
+  assert.equal(commands.added[0].name, "parsnip")
   assert.equal(typeof commands.added[0].execute, "function")
 })
 
@@ -796,7 +796,7 @@ test("config tool: toggles global compression and execute.after honors it", asyn
 
   const out = await tool.execute({ compression: true }, { sessionID: "ses_test" })
   assert.match(out.content[0].text, /effective: compression on, dedup on/)
-  assert.deepEqual(h.store.get("ctx-guard:config"), { compression: true })
+  assert.deepEqual(h.store.get("parsnip:config"), { compression: true })
 
   const event = toolEvent()
   await h.hooks["execute.after"](event)
@@ -814,7 +814,7 @@ test("config tool: a session override beats the global override", async () => {
   await tool.execute({ compression: true }, { sessionID: "ses_test" }) // global on
   const scoped = await tool.execute({ compression: false, session: true }, { sessionID: "ses_test" })
   assert.match(scoped.content[0].text, /effective: compression off, dedup on/)
-  assert.deepEqual(h.store.get("session:ses_test:ctx-guard"), { compression: false })
+  assert.deepEqual(h.store.get("session:ses_test:parsnip"), { compression: false })
 
   // A different session still sees the global override (compression on).
   const other = toolEvent({ sessionID: "ses_other" })
@@ -831,13 +831,13 @@ test("config command: parses `compression off` and scopes with `session`", async
   const command = commands.added[0]
 
   await command.execute({ sessionID: "ses_test", prompt: "compression off" })
-  assert.deepEqual(h.store.get("ctx-guard:config"), { compression: false })
+  assert.deepEqual(h.store.get("parsnip:config"), { compression: false })
 
   await command.execute({ sessionID: "ses_test", prompt: "dedup off session" })
-  assert.deepEqual(h.store.get("session:ses_test:ctx-guard"), { dedup: false })
+  assert.deepEqual(h.store.get("session:ses_test:parsnip"), { dedup: false })
 
   await command.execute({ sessionID: "ses_test", prompt: "reset" })
-  assert.equal(h.store.has("ctx-guard:config"), false)
+  assert.equal(h.store.has("parsnip:config"), false)
 })
 
 test("config tool: sets the selector; an unknown selector is ignored", async () => {
@@ -850,11 +850,11 @@ test("config tool: sets the selector; an unknown selector is ignored", async () 
 
   const out = await tool.execute({ selector: "head-tail" }, { sessionID: "ses_test" })
   assert.match(out.content[0].text, /selector head-tail/)
-  assert.deepEqual(h.store.get("ctx-guard:config"), { selector: "head-tail" })
+  assert.deepEqual(h.store.get("parsnip:config"), { selector: "head-tail" })
 
   // Unknown selector: silently ignored, no write for the other session.
   await tool.execute({ selector: "nope" }, { sessionID: "ses_other" })
-  assert.equal(h.store.has("session:ses_other:ctx-guard"), false)
+  assert.equal(h.store.has("session:ses_other:parsnip"), false)
 })
 
 test("config command: parses `selector head-tail`; unknown selector writes nothing", async () => {
@@ -866,10 +866,10 @@ test("config command: parses `selector head-tail`; unknown selector writes nothi
   const command = commands.added[0]
 
   await command.execute({ sessionID: "ses_test", prompt: "selector head-tail" })
-  assert.deepEqual(h.store.get("ctx-guard:config"), { selector: "head-tail" })
+  assert.deepEqual(h.store.get("parsnip:config"), { selector: "head-tail" })
 
   await command.execute({ sessionID: "ses_test", prompt: "selector nope" })
-  assert.deepEqual(h.store.get("ctx-guard:config"), { selector: "head-tail" })
+  assert.deepEqual(h.store.get("parsnip:config"), { selector: "head-tail" })
 })
 
 // --- Fidelity ledger --------------------------------------------------------
@@ -877,7 +877,7 @@ test("config command: parses `selector head-tail`; unknown selector writes nothi
 test("execute.after: records a per-method fidelity event with the dropped-region hash", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true })
 
   await h.hooks["execute.after"](toolEvent())
 
@@ -911,13 +911,13 @@ test("execute.after: no fidelity event when compression is off", async () => {
 test("execute.after: a compression stores the full dropped text and appends a recall note", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true })
 
   const event = toolEvent()
   await h.hooks["execute.after"](event)
 
   const text = (event.result.content as Array<AnyRecord>)[0].text
-  const match = text.match(/ctxguard_recall\("(recall-\d+)"\)/)
+  const match = text.match(/parsnip_recall\("(recall-\d+)"\)/)
   assert.ok(match, "recall note present in the compressed output")
 
   const state = h.store.get("session:ses_test:recall") as AnyRecord
@@ -928,19 +928,19 @@ test("execute.after: a compression stores the full dropped text and appends a re
   assert.equal(state.entries[0].text, "x".repeat(6000), "the FULL pre-compression text is stored")
 })
 
-test("ctxguard_recall: returns the stored text, or a not-found note", async () => {
+test("parsnip_recall: returns the stored text, or a not-found note", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("ctx-guard:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true })
   await h.hooks["execute.after"](toolEvent())
 
   const tools = collectorEditor()
   h.toolTransforms[0](tools.editor)
-  const recall = tools.added.find((t) => t.name === "ctxguard_recall")
+  const recall = tools.added.find((t) => t.name === "parsnip_recall")
   assert.ok(recall, "recall tool registered")
 
   const found = await recall.execute({ id: "recall-1" }, { sessionID: "ses_test" })
-  assert.match(found.content[0].text, /ctx-guard recall recall-1/)
+  assert.match(found.content[0].text, /parsnip recall recall-1/)
   assert.ok(found.content[0].text.includes("x".repeat(6000)), "returns the full text")
 
   const missing = await recall.execute({ id: "recall-999" }, { sessionID: "ses_test" })
@@ -1039,7 +1039,7 @@ test("config tool: a change records a decision; a bare view does not", async () 
 
   await added[0].execute({ compression: true, selector: "extractive" }, { sessionID: "ses_test" })
   const state = h.store.get("session:ses_test") as AnyRecord
-  assert.deepEqual(state.decisions, ["ctx-guard: compression on, selector extractive (global)"])
+  assert.deepEqual(state.decisions, ["parsnip: compression on, selector extractive (global)"])
 })
 
 test("config tool: minChars alone is both applied and recorded", async () => {
@@ -1050,9 +1050,9 @@ test("config tool: minChars alone is both applied and recorded", async () => {
   h.toolTransforms[0](editor)
 
   await added[0].execute({ minChars: 1500 }, { sessionID: "ses_test" })
-  assert.deepEqual(h.store.get("ctx-guard:config"), { minChars: 1500 }, "the setting was written")
+  assert.deepEqual(h.store.get("parsnip:config"), { minChars: 1500 }, "the setting was written")
   const state = h.store.get("session:ses_test") as AnyRecord
-  assert.deepEqual(state.decisions, ["ctx-guard: threshold 1500 (global)"], "and it left a trace")
+  assert.deepEqual(state.decisions, ["parsnip: threshold 1500 (global)"], "and it left a trace")
 
   // The value must survive the read path the hook actually uses.
   assert.equal((await effectiveConfig(h.ctx.storage, "ses_test")).minChars, 1500)
@@ -1068,7 +1068,7 @@ test("config command: records a decision, preserving the other fields", async ()
   await commands.added[0].execute({ sessionID: "ses_test", prompt: "dedup off session" })
 
   const state = h.store.get("session:ses_test") as AnyRecord
-  assert.deepEqual(state.decisions, ["ctx-guard: dedup off (session)"])
+  assert.deepEqual(state.decisions, ["parsnip: dedup off (session)"])
   assert.deepEqual(state.activeFiles, ["/x/y.ts"], "the command write dropped activeFiles")
 })
 
@@ -1090,7 +1090,7 @@ test("a failed decision record never fails the config write", async () => {
     assert.match(out.content[0].text, /compression on/)
   })
 
-  assert.deepEqual(h.store.get("ctx-guard:config"), { compression: true }, "the config write failed")
+  assert.deepEqual(h.store.get("parsnip:config"), { compression: true }, "the config write failed")
   assert.ok(
     lines.some((line) => line.includes("decision record failed")),
     `expected a logged decision failure, got ${JSON.stringify(lines)}`,
@@ -1102,7 +1102,7 @@ test("compaction: the block now renders decisions and files", async () => {
   await ctxGuard.setup(h.ctx)
   await h.ctx.storage.set("session:ses_test", {
     lastTask: "wire the RPC",
-    decisions: ["ctx-guard: compression on (global)"],
+    decisions: ["parsnip: compression on (global)"],
     activeFiles: ["/home/oca/project/index.ts", "/home/oca/project/rpc.ts"],
     agent: "build",
   })
@@ -1112,7 +1112,7 @@ test("compaction: the block now renders decisions and files", async () => {
   const injected = event.system[1] as AnyRecord
 
   assert.match(injected.text, /Recent decisions:/)
-  assert.match(injected.text, /ctx-guard: compression on \(global\)/)
+  assert.match(injected.text, /parsnip: compression on \(global\)/)
   assert.match(injected.text, /Active files: .*index\.ts/)
 })
 

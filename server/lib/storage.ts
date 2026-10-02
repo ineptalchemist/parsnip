@@ -124,19 +124,19 @@ export function describeDecision(
   scope: string,
   reset = false,
 ): string {
-  if (reset) return `ctx-guard config reset (${scope})`
+  if (reset) return `parsnip config reset (${scope})`
   const parts: string[] = []
   if (typeof patch.compression === "boolean") {
     parts.push(`compression ${patch.compression ? "on" : "off"}`)
   }
   if (typeof patch.dedup === "boolean") parts.push(`dedup ${patch.dedup ? "on" : "off"}`)
   if (patch.selector) parts.push(`selector ${patch.selector}`)
-  // Presence, not `typeof`: `/ctx-guard threshold default` hands back an explicit
+  // Presence, not `typeof`: `/parsnip threshold default` hands back an explicit
   // `minChars: undefined`, and handing the threshold back to its own default is
   // a real decision — indistinguishable from "field absent" otherwise.
   if ("minChars" in patch) parts.push(`threshold ${patch.minChars ?? "default"}`)
   if (parts.length === 0) return ""
-  return `ctx-guard: ${parts.join(", ")} (${scope})`
+  return `parsnip: ${parts.join(", ")} (${scope})`
 }
 
 /** Append a decision, newest last, deduped and bounded. */

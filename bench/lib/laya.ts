@@ -22,7 +22,7 @@ export type Relevance = { threshold: number; items: Record<string, RelevanceItem
 export const LAYA_MIDDLE_BUDGET = 2000
 
 export const layaMarker = (kept: number, total: number): string =>
-  `… [ctx-guard: laya kept ${kept} of ${total} middle lines] …`
+  `… [parsnip: laya kept ${kept} of ${total} middle lines] …`
 
 /**
  * Keep head + tail verbatim, plus the middle lines with `p >= threshold`

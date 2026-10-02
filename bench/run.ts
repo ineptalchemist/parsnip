@@ -11,7 +11,7 @@
  * save in a real session" (that is the per-session savings ledger in the live
  * plugin). The two numbers are different because OpenCode's native
  * `tool_output.max_lines` (500 lines / 20000 bytes) truncates *multi-line*
- * output before the plugin ever sees it — so ctx-guard's compression only earns
+ * output before the plugin ever sees it — so parsnip's compression only earns
  * its keep on results that are long but *few-lined* (diffs, minified JSON, long
  * single log lines).
  */
@@ -71,7 +71,7 @@ const CORPUS: Item[] = [
 const O = COMPRESSION_OPTIONS
 
 function main(): void {
-  console.log("ctx-guard offline benchmark")
+  console.log("parsnip offline benchmark")
   console.log(
     `compression: min ${O.minChars} chars, keep head ${O.headChars} + tail ${O.tailChars}`,
   )

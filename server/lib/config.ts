@@ -1,5 +1,5 @@
 /**
- * Runtime enablement config for ctx-guard's lossy transforms.
+ * Runtime enablement config for parsnip's lossy transforms.
  *
  * Precedence (highest first): per-session override -> global override -> default.
  * Both overrides live in `ctx.storage` (the `kv` table), so a toggle survives
@@ -65,8 +65,8 @@ export const DEFAULT_CONFIG: CtxGuardConfig = {
   selector: "head-tail",
 }
 
-export const GLOBAL_CONFIG_KEY = "ctx-guard:config"
-export const sessionConfigKey = (sessionID: string): string => `session:${sessionID}:ctx-guard`
+export const GLOBAL_CONFIG_KEY = "parsnip:config"
+export const sessionConfigKey = (sessionID: string): string => `session:${sessionID}:parsnip`
 
 /** Scope a change can be applied at. */
 export type ConfigScope = "global" | "session"

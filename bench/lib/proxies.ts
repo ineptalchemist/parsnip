@@ -113,11 +113,11 @@ export function pct(kept: number, total: number): number | null {
 // --- Fragmentation (cut-token detection) -------------------------------------
 
 /**
- * `[ctx-guard: …]` markers, dropped before fragment tokenizing so marker
+ * `[parsnip: …]` markers, dropped before fragment tokenizing so marker
  * vocabulary (`chars`, `omitted`, `kept`, `middle`, counts) can never be
  * mistaken for content.
  */
-const MARKER = /\[ctx-guard:[^\]]*\]/g
+const MARKER = /\[parsnip:[^\]]*\]/g
 
 /** True when `token` is a proper prefix or suffix of some whole input identifier. */
 function isFragment(token: string, ids: Set<string>): boolean {

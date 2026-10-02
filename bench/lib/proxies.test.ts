@@ -124,7 +124,7 @@ test("fragments: marker vocabulary is stripped before tokenizing", () => {
   const input = `${long} and more text`
   // Without stripping, the marker's "middle" would look like a fragment of
   // `middleware_aaa…`. Only the truncated long line is a real cut.
-  const output = `${long.slice(0, 399)}… [ctx-guard: 5 signal line(s) from the omitted middle] …\nand more text`
+  const output = `${long.slice(0, 399)}… [parsnip: 5 signal line(s) from the omitted middle] …\nand more text`
   assert.equal(fragments(input, output), 1)
 })
 

@@ -117,7 +117,7 @@ function rollupRows(perItem: ItemRows[]): string[][] {
 // --- main -------------------------------------------------------------------
 
 function main(): void {
-  console.log("ctx-guard selector comparison")
+  console.log("parsnip selector comparison")
   console.log(`corpus: ${CORPUS.length} items, all above the selectors' 4000-char gate`)
   console.log(`selectors: ${SELECTOR_NAMES.join(", ")}`)
   console.log("token heuristic: chars / 4 (uncalibrated)")

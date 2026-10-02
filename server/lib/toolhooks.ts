@@ -69,7 +69,7 @@ export const SEARCH_TOOLS: readonly string[] = [
 export const TARGET_TOOLS: readonly string[] = [...SHELL_TOOLS, ...SEARCH_TOOLS]
 
 export const DEDUP_MARKER =
-  "[ctx-guard: duplicate output suppressed — same command ran recently]"
+  "[parsnip: duplicate output suppressed — same command ran recently]"
 
 /**
  * Longest command snippet kept as continuity state.
@@ -515,9 +515,9 @@ export async function saveRecentCompressions(
 // --- Recall cache (per-session dropped-text store) ---------------------------
 //
 // Compression is lossy to the *prompt* but must be lossless to the *system*:
-// every byte ctx-guard drops is kept here, keyed by a short recall id surfaced in
-// the omission marker, so the agent (via the `ctxguard_recall` tool) or a human
-// (via `/ctx-guard recall`) can get the full text back. Bounded by total bytes and
+// every byte parsnip drops is kept here, keyed by a short recall id surfaced in
+// the omission marker, so the agent (via the `parsnip_recall` tool) or a human
+// (via `/parsnip recall`) can get the full text back. Bounded by total bytes and
 // entry count; oldest evicted first. This is the backstop for the fact that no
 // selector — literal or model — can know a priori what matters.
 
@@ -584,7 +584,7 @@ export async function saveRecall(
 
 /** The marker appended to a compressed result so its dropped text is recoverable. */
 export function recallNote(id: string, sample: string): string {
-  return `[ctx-guard: full text dropped — recall ctxguard_recall("${id}") — dropped region starts: "${sample}"]`
+  return `[parsnip: full text dropped — recall parsnip_recall("${id}") — dropped region starts: "${sample}"]`
 }
 
 /**

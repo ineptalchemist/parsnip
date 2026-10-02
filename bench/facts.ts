@@ -6,7 +6,7 @@
  * *live-valid window*: over the selectors' 4000-char gate so compression runs,
  * but under OpenCode's native `tool_output` caps (500 lines / 20000 bytes) so
  * native truncation does not pre-empt it — i.e. these are the few-line-but-long
- * outputs where ctx-guard actually earns its keep.
+ * outputs where parsnip actually earns its keep.
  *
  * Fact bands (`head` / `middle` / `tail`) are declared against the head-tail
  * baseline cut and validated by `recovery.test.ts` against `bandOf`.

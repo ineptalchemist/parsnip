@@ -45,7 +45,7 @@ test("buildContinuityBlock: renders agent, task, decisions, files and occupancy"
     },
   })
 
-  assert.ok(block.startsWith("[ctx-guard continuity]"))
+  assert.ok(block.startsWith("[parsnip continuity]"))
   assert.match(block, /Agent mode: build/)
   assert.match(block, /Current task: wire the compaction hook/)
   assert.match(block, /Recent decisions:/)

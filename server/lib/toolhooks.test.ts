@@ -87,7 +87,7 @@ test("compressText: keeps exact head and tail with a counted omission marker", (
   assert.ok(out.startsWith("H".repeat(20)))
   assert.ok(out.endsWith("T".repeat(10)))
   assert.equal(out, `H`.repeat(20) + `\n${omissionMarker(71)}\n` + "T".repeat(10))
-  assert.match(out, /\[ctx-guard: 71 chars omitted\]/)
+  assert.match(out, /\[parsnip: 71 chars omitted\]/)
 })
 
 test("compressText: single-char edge with a zero threshold cannot go negative", () => {
@@ -510,7 +510,7 @@ test("recall: round-trips, keeps seq, and is bounded by entries and bytes", asyn
 test("recallNote: names the id and the dropped-region sample", () => {
   assert.equal(
     recallNote("recall-7", "ERROR: boom"),
-    '[ctx-guard: full text dropped — recall ctxguard_recall("recall-7") — dropped region starts: "ERROR: boom"]',
+    '[parsnip: full text dropped — recall parsnip_recall("recall-7") — dropped region starts: "ERROR: boom"]',
   )
 })
 

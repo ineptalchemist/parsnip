@@ -1,8 +1,8 @@
-# ctx-guard — development notes
+# parsnip — development notes
 
 Working notes behind the README: how the design decisions were reached, and the
 research threads that are not part of the shipped plugin. Nothing here is
-load-bearing for using ctx-guard.
+load-bearing for using parsnip.
 
 ---
 

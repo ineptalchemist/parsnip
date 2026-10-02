@@ -3,7 +3,7 @@
  *
  * A selector maps a text string to a compaction of it. The **faithful
  * contract**: the output is a verbatim subset of the input's words/lines,
- * optionally joined by delimited `[ctx-guard: …]` markers that carry only
+ * optionally joined by delimited `[parsnip: …]` markers that carry only
  * counts; a selector never invents content. Selectors are pure and synchronous.
  *
  * This is a **leaf module**: it imports nothing from the rest of the server, so
@@ -73,7 +73,7 @@ function validThreshold(minChars: number | undefined): minChars is number {
 }
 
 export function omissionMarker(omittedChars: number): string {
-  return `… [ctx-guard: ${omittedChars} chars omitted] …`
+  return `… [parsnip: ${omittedChars} chars omitted] …`
 }
 
 export function shouldCompress(text: string, o: CompressOptions): boolean {
@@ -178,7 +178,7 @@ export function compressTokenBudget(text: string, o: TokenBudgetOptions): string
 //
 // Structural compaction of shell output before any positional cut: strip ANSI
 // escapes (lossless) and collapse runs of identical consecutive lines to one
-// verbatim line plus a `[ctx-guard: ×N]` count marker. Distinct lines pass
+// verbatim line plus a `[parsnip: ×N]` count marker. Distinct lines pass
 // through untouched.
 
 /** SGR/CSI escape sequences: colors, cursor moves. */
@@ -193,7 +193,7 @@ export function stripAnsi(text: string): string {
 
 /** Count marker for a run of identical lines. */
 export function runMarker(count: number): string {
-  return `[ctx-guard: ×${count}]`
+  return `[parsnip: ×${count}]`
 }
 
 /**
@@ -233,7 +233,7 @@ export const LOG_COMPACT_OPTIONS: LogCompactOptions = {
 /**
  * Strip ANSI escapes and collapse identical consecutive-line runs, then bound
  * the result with head-tail when it is still oversized. Faithful: the retained
- * text is verbatim; only `[ctx-guard: …]` count markers are added.
+ * text is verbatim; only `[parsnip: …]` count markers are added.
  */
 export function compressLog(text: string, o: LogCompactOptions): string {
   if (text.length <= o.minChars) return text
@@ -327,7 +327,7 @@ export function signalLines(middle: string, o: SignalOptions): string[] {
 /**
  * Keep head + tail, rescuing bounded middle lines that match `SIGNAL_PATTERN`.
  * Degenerates to head-tail when the middle has no signal. Faithful: retained
- * text is verbatim; only `[ctx-guard: …]` markers are added.
+ * text is verbatim; only `[parsnip: …]` markers are added.
  */
 export function compressSignal(text: string, o: SignalOptions): string {
   if (text.length <= o.minChars) return text
@@ -344,7 +344,7 @@ export function compressSignal(text: string, o: SignalOptions): string {
 
   const keptText = kept.join("\n")
   const omitted = middle.length - keptText.length
-  const signalHeader = `… [ctx-guard: ${kept.length} signal line(s) from the omitted middle] …`
+  const signalHeader = `… [parsnip: ${kept.length} signal line(s) from the omitted middle] …`
   const tailMarker = omitted > 0 ? `${omissionMarker(omitted)}\n` : ""
   return `${head}\n${signalHeader}\n${keptText}\n${tailMarker}${tail}`
 }
@@ -460,7 +460,7 @@ export function scoreLine(
 /**
  * Keep a fixed lead + tail and fill the remaining budget with the highest
  * scoring middle lines, in original order. Faithful: retained lines are
- * verbatim (or "…"-truncated); only `[ctx-guard: …]` markers are added.
+ * verbatim (or "…"-truncated); only `[parsnip: …]` markers are added.
  */
 export function compressExtractive(text: string, o: ExtractiveOptions): string {
   if (text.length <= o.minChars) return text
@@ -501,7 +501,7 @@ export function compressExtractive(text: string, o: ExtractiveOptions): string {
   kept.sort((a, b) => a.index - b.index)
 
   const selected = kept.map((entry) => emit(entry.line))
-  const header = `… [ctx-guard: kept ${selected.length} of ${middle.length} middle lines] …`
+  const header = `… [parsnip: kept ${selected.length} of ${middle.length} middle lines] …`
   return `${lead.map(emit).join("\n")}\n${header}\n${selected.join("\n")}\n${tail.map(emit).join("\n")}`
 }
 

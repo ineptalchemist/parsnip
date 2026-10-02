@@ -1,10 +1,10 @@
-# ctx-guard
+# parsnip
 
 A cache-preserving context manager for [OpenCode](https://opencode.ai) V2.
 
 Long sessions get expensive because the prompt grows. The usual fix is to fold
 stale history into summaries — but that rewrites the live conversation prefix and
-throws away the provider's prompt cache. ctx-guard takes the opposite approach:
+throws away the provider's prompt cache. parsnip takes the opposite approach:
 **it never mutates the live prefix.** It works only at the native compaction
 boundary, and on new tool output as it enters the window.
 
@@ -12,7 +12,7 @@ Everything it drops is recoverable, and it publishes what it dropped.
 
 ## Why the cache survives
 
-Prompt caching only pays off if the prefix stays byte-identical. So ctx-guard is
+Prompt caching only pays off if the prefix stays byte-identical. So parsnip is
 built around a single rule, and the rule is narrow on purpose:
 
 > **The only surfaces allowed to alter content are:**
@@ -44,7 +44,7 @@ npm install          # devDependency only; the plugin has zero runtime deps
 Symlink the `server/` directory into OpenCode's plugins directory:
 
 ```bash
-ln -s "$PWD/server" ~/.config/opencode/plugins/ctx-guard
+ln -s "$PWD/server" ~/.config/opencode/plugins/parsnip
 ```
 
 No `opencode.jsonc` entry is needed — server plugins are auto-discovered. Editing
@@ -57,28 +57,28 @@ is **session override → global override → default**.
 
 **Defaults: compression OFF, dedup ON, selector `head-tail`, threshold 4000.**
 
-As the agent, call the `ctxguard_config` tool:
+As the agent, call the `parsnip_config` tool:
 
 ```
-ctxguard_config { compression: true }              # turn compression on
-ctxguard_config { selector: "log-compact" }        # swap the method
-ctxguard_config { minChars: 1500 }                 # lower the threshold
-ctxguard_config { compression: false, session: true }  # this session only
-ctxguard_config                                     # view; changes nothing
+parsnip_config { compression: true }              # turn compression on
+parsnip_config { selector: "log-compact" }        # swap the method
+parsnip_config { minChars: 1500 }                 # lower the threshold
+parsnip_config { compression: false, session: true }  # this session only
+parsnip_config                                     # view; changes nothing
 ```
 
 As a human, run the slash command:
 
 ```
-/ctx-guard compression off
-/ctx-guard selector log-compact
-/ctx-guard threshold 1500        # or: threshold default
-/ctx-guard dedup on session
-/ctx-guard reset
+/parsnip compression off
+/parsnip selector log-compact
+/parsnip threshold 1500        # or: threshold default
+/parsnip dedup on session
+/parsnip reset
 ```
 
 V2 commands cannot return output, so these apply silently — confirm with the
-`ctxguard_config` tool. `execute.after` reads the effective config fresh on every
+`parsnip_config` tool. `execute.after` reads the effective config fresh on every
 call, so a toggle takes effect on the next tool call with no hot reload.
 
 ### The threshold
@@ -111,14 +111,14 @@ Every other hook writes only to `ctx.storage`.
 Applies to shell (`bash`/`shell`) and search/retrieval tools (`websearch`,
 `web_fetch`, `firecrawl_*`) over the threshold. All selectors are pure,
 synchronous, and **faithful**: the output is a verbatim subset of the input — a
-selector never invents content, only drops and adds delimited `[ctx-guard: …]`
+selector never invents content, only drops and adds delimited `[parsnip: …]`
 markers carrying counts.
 
 | Selector | Behaviour | Reach for it when |
 |---|---|---|
 | `head-tail` *(default)* | Head + tail with a counted omission marker | You want the predictable baseline |
 | `token-budget` | Same budget, cut on token boundaries so identifiers are never split | Output is full of long identifiers you'd hate to see sliced |
-| `log-compact` | Strips ANSI, collapses runs of identical lines (`[ctx-guard: ×N]`), then bounds with head-tail | Output is repetitive logs — best ratio by a wide margin |
+| `log-compact` | Strips ANSI, collapses runs of identical lines (`[parsnip: ×N]`), then bounds with head-tail | Output is repetitive logs — best ratio by a wide margin |
 | `signal-preserving` | Head + tail plus bounded middle lines matching a diagnostic pattern (errors, `file:line`, hashes, URLs) | You are reading build/test output and want the failures |
 | `extractive` | 3-line lead + tail plus the highest-scoring middle lines (position, length, signal, shape novelty) | Output is heterogeneous and you want the "interesting" lines |
 
@@ -142,11 +142,11 @@ per-session store (1 MB / 128 entries, oldest evicted first), and the compressed
 output gains a note naming the id:
 
 ```
-[ctx-guard: full text dropped — recall ctxguard_recall("recall-3") — …]
+[parsnip: full text dropped — recall parsnip_recall("recall-3") — …]
 ```
 
-The agent retrieves it with the `ctxguard_recall` tool. A human can use
-`/ctx-guard recall <id>`, which only logs the size — V2 commands cannot return
+The agent retrieves it with the `parsnip_recall` tool. A human can use
+`/parsnip recall <id>`, which only logs the size — V2 commands cannot return
 output, so the tool is the real retrieval path.
 
 This is the backstop for a hard limit: **no selector can know a priori which part

@@ -105,7 +105,7 @@ const BIG_COLUMNS: Col[] = [
 ]
 
 function main(): void {
-  console.log("ctx-guard threshold sweep")
+  console.log("parsnip threshold sweep")
   console.log(`thresholds: ${THRESHOLDS.join(", ")}`)
   console.log(`selectors: ${SELECTOR_NAMES.join(", ")}`)
   console.log(`small corpus: ${SMALL_CORPUS.length} items, ${total(SMALL_CORPUS.map((i) => i.text.length))} chars total`)

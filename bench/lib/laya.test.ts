@@ -48,7 +48,7 @@ test("layaSelect: a missing score counts as 0 (dropped)", () => {
 })
 
 test("layaMarker: reports counts", () => {
-  assert.equal(layaMarker(2, 40), "… [ctx-guard: laya kept 2 of 40 middle lines] …")
+  assert.equal(layaMarker(2, 40), "… [parsnip: laya kept 2 of 40 middle lines] …")
 })
 
 test("parseRelevance: accepts a valid map, rejects junk", () => {

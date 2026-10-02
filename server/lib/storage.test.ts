@@ -238,22 +238,22 @@ test("appendActiveFile: dedupes, bounds, and reports no-change", () => {
 test("describeDecision: renders only explicit changes", () => {
   assert.equal(
     describeDecision({ compression: true, dedup: false, selector: "extractive" }, "global"),
-    "ctx-guard: compression on, dedup off, selector extractive (global)",
+    "parsnip: compression on, dedup off, selector extractive (global)",
   )
-  assert.equal(describeDecision({ compression: true }, "session"), "ctx-guard: compression on (session)")
-  assert.equal(describeDecision({}, "global", true), "ctx-guard config reset (global)")
+  assert.equal(describeDecision({ compression: true }, "session"), "parsnip: compression on (session)")
+  assert.equal(describeDecision({}, "global", true), "parsnip config reset (global)")
   assert.equal(describeDecision({}, "global"), "", "an empty patch is not a decision")
 })
 
 test("describeDecision: records a threshold change", () => {
-  assert.equal(describeDecision({ minChars: 1500 }, "global"), "ctx-guard: threshold 1500 (global)")
+  assert.equal(describeDecision({ minChars: 1500 }, "global"), "parsnip: threshold 1500 (global)")
   assert.equal(
     describeDecision({ selector: "log-compact", minChars: 800 }, "session"),
-    "ctx-guard: selector log-compact, threshold 800 (session)",
+    "parsnip: selector log-compact, threshold 800 (session)",
   )
   assert.equal(
     describeDecision({ minChars: undefined }, "global"),
-    "ctx-guard: threshold default (global)",
+    "parsnip: threshold default (global)",
     "handing the threshold back to its own default is a decision, not a no-op",
   )
 })

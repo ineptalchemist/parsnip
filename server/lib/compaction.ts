@@ -109,7 +109,7 @@ export function buildContinuityBlock(input: ContinuityInput): string {
     return ""
   }
 
-  const lines: string[] = ["[ctx-guard continuity]"]
+  const lines: string[] = ["[parsnip continuity]"]
   if (agent) lines.push(`Agent mode: ${agent}`)
 
   if (task) lines.push(`Current task: ${truncate(task, MAX_TASK_CHARS)}`)

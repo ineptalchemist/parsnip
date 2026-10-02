@@ -117,7 +117,7 @@ function main(): void {
     return `${band} ${n}`
   })
 
-  console.log("ctx-guard known-answer eval")
+  console.log("parsnip known-answer eval")
   console.log(`corpus: ${FACT_CORPUS.length} items, ${totalFacts} planted facts (${bandCounts.join(" / ")})`)
   console.log(`arms: ${arms.map((a) => a.name).join(", ")}`)
   console.log(

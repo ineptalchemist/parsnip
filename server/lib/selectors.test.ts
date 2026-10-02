@@ -79,7 +79,7 @@ test("head-tail select: faithful — the kept bytes are verbatim from the input"
   const stripped = out.replace(`\n${omissionMarker(omitted)}\n`, "")
   assert.equal(stripped, head + tail)
   assert.equal(stripped.length, HEAD_CHARS + TAIL_CHARS)
-  assert.match(out, /\[ctx-guard: 4000 chars omitted\]/)
+  assert.match(out, /\[parsnip: 4000 chars omitted\]/)
 })
 
 test("head-tail select: below the threshold is untouched", () => {
@@ -107,7 +107,7 @@ test("token-budget select: cuts on word boundaries, keeping whole words", () => 
   const text = "word ".repeat(3000)
   const out = tokenBudget.select(text)
 
-  const head = out.slice(0, out.indexOf("\n… [ctx-guard:"))
+  const head = out.slice(0, out.indexOf("\n… [parsnip:"))
   assert.ok(head.length > 0 && text.startsWith(head), "head must be a prefix")
   assert.equal(head.at(-1), " ", "head must end right after a boundary")
   assert.equal(head.length % 5, 0, "head must end on a word boundary")
@@ -125,7 +125,7 @@ test("token-budget select: no boundary in range falls back to the raw char cut",
 test("token-budget select: never splits a surrogate pair on the fallback cut", () => {
   const text = `${"x".repeat(1599)}${"\u{1F600}".repeat(2000)}`
   const out = tokenBudget.select(text)
-  const head = out.slice(0, out.indexOf("\n… [ctx-guard:"))
+  const head = out.slice(0, out.indexOf("\n… [parsnip:"))
   const last = head.charCodeAt(head.length - 1)
   assert.ok(!(last >= 0xd800 && last <= 0xdbff), "head must not end on a lone high surrogate")
   assert.equal(head.length, 1599)
@@ -148,7 +148,7 @@ test("stripAnsi: removes SGR and OSC escapes, leaving visible text", () => {
 })
 
 test("collapseRuns: a run >= minRun becomes one line plus a count marker", () => {
-  assert.equal(collapseRuns("a\na\na\nb\n", 3), "a  [ctx-guard: ×3]\nb\n")
+  assert.equal(collapseRuns("a\na\na\nb\n", 3), "a  [parsnip: ×3]\nb\n")
   // A pair is below minRun 3 and is left alone.
   assert.equal(collapseRuns("a\na\nb\n", 3), "a\na\nb\n")
   // Distinct lines are never collapsed.
@@ -164,7 +164,7 @@ test("log-compact select: strips ANSI and collapses a repeated run", () => {
   const text = `${"\x1b[33mWARN timed out\x1b[0m\n".repeat(300)}done`
   const out = logCompact.select(text)
   assert.ok(!out.includes("\x1b"), "ANSI must be stripped")
-  assert.match(out, /WARN timed out {2}\[ctx-guard: ×300\]/)
+  assert.match(out, /WARN timed out {2}\[parsnip: ×300\]/)
   assert.ok(out.endsWith("done"))
 })
 
@@ -173,13 +173,13 @@ test("log-compact select: many distinct lines fall back to the head-tail bound",
     { length: 600 },
     (_, i) => `distinct line number ${i} ${"p".repeat(30)}`,
   ).join("\n")
-  assert.match(logCompact.select(text), /\[ctx-guard: \d+ chars omitted\]/)
+  assert.match(logCompact.select(text), /\[parsnip: \d+ chars omitted\]/)
 })
 
 test("log-compact select: retained lines are verbatim", () => {
   const text = `${"the quick brown fox\n".repeat(300)}tail`
   const out = logCompact.select(text)
-  assert.ok(out.startsWith("the quick brown fox  [ctx-guard: ×300]"))
+  assert.ok(out.startsWith("the quick brown fox  [parsnip: ×300]"))
   assert.ok(out.endsWith("tail"))
 })
 
@@ -230,7 +230,7 @@ test("signal-preserving select: rescues a middle error line; head stays whole li
   assert.match(out, /ERROR: the thing failed at src\/foo\.ts:42:7/)
   assert.match(out, /signal line\(s\) from the omitted middle/)
 
-  const headPart = out.slice(0, out.indexOf("\n… [ctx-guard:"))
+  const headPart = out.slice(0, out.indexOf("\n… [parsnip:"))
   assert.ok(text.startsWith(headPart), "head must be a verbatim prefix")
   assert.ok(headPart.endsWith("\n"), "head must end at a line boundary")
 })
@@ -238,13 +238,13 @@ test("signal-preserving select: rescues a middle error line; head stays whole li
 test("signal-preserving select: no signal in the middle degenerates to head-tail", () => {
   const lines = Array.from({ length: 500 }, (_, i) => `chatter ${i} ${"c".repeat(24)}`)
   const out = signalPreserving.select(lines.join("\n"))
-  assert.match(out, /\[ctx-guard: \d+ chars omitted\]/)
+  assert.match(out, /\[parsnip: \d+ chars omitted\]/)
   assert.ok(!out.includes("signal line"), "no signal header when nothing matches")
 })
 
 test("signal-preserving select: a giant one-liner falls back to a bounded char cut", () => {
   const out = signalPreserving.select("x".repeat(8000))
-  assert.match(out, /\[ctx-guard: \d+ chars omitted\]/)
+  assert.match(out, /\[parsnip: \d+ chars omitted\]/)
   assert.ok(out.length < 3000, `expected a bounded result, got ${out.length}`)
 })
 
@@ -311,7 +311,7 @@ test("extractive select: retained lines are verbatim", () => {
   const out = extractive.select(text)
 
   for (const line of out.split("\n")) {
-    if (line === "" || line.startsWith("… [ctx-guard:")) continue
+    if (line === "" || line.startsWith("… [parsnip:")) continue
     assert.ok(text.includes(line), `not verbatim: ${line}`)
   }
 })
@@ -375,7 +375,7 @@ test("select: a lowered threshold reaches results the frozen floor missed", () =
   for (const selector of Object.values(SELECTORS)) {
     const out = selector.select(text, 1200)
     assert.ok(out.length < text.length, `${selector.id} did not compact a 1500-char result`)
-    assert.match(out, /ctx-guard/, `${selector.id} emitted no marker`)
+    assert.match(out, /parsnip/, `${selector.id} emitted no marker`)
   }
 })
 

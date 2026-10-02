@@ -1,5 +1,5 @@
 /**
- * ctx-guard — server plugin (compaction + occupancy + continuity + tool hooks +
+ * parsnip — server plugin (compaction + occupancy + continuity + tool hooks +
  * structural report).
  *
  * Cache-preservation invariant (the whole point of this plugin):
@@ -287,7 +287,7 @@ export function guarded<Args extends unknown[]>(
     try {
       await body(...args)
     } catch (error) {
-      console.error(`[ctx-guard] ${label} failed (ignored):`, error)
+      console.error(`[parsnip] ${label} failed (ignored):`, error)
     }
   }
 }
@@ -310,13 +310,13 @@ async function register(
   try {
     registrations.push(await start())
   } catch (error) {
-    console.error(`[ctx-guard] ${label} registration failed (skipped):`, error)
+    console.error(`[parsnip] ${label} registration failed (skipped):`, error)
   }
 }
 
 // --- Runtime config surfaces (tool + command) --------------------------------
 
-const CONFIG_TOOL_NAME = "ctxguard_config"
+const CONFIG_TOOL_NAME = "parsnip_config"
 
 /** Longest stored form of the current task; the block truncates again on render. */
 const MAX_TASK_CHARS = 240
@@ -339,7 +339,7 @@ function promptText(prompt: unknown): string {
 /**
  * Record an explicit config change as a continuity decision.
  *
- * Only *human/agent-initiated* toggles are recorded — a bare `ctxguard_config`
+ * Only *human/agent-initiated* toggles are recorded — a bare `parsnip_config`
  * view changes nothing and so records nothing. Best-effort: a failure here must
  * never fail the config write that triggered it.
  */
@@ -368,7 +368,7 @@ async function recordConfigDecision(
       lastCommand: previous?.lastCommand,
     })
   } catch (error) {
-    console.error("[ctx-guard] decision record failed (ignored):", error)
+    console.error("[parsnip] decision record failed (ignored):", error)
   }
 }
 
@@ -381,7 +381,7 @@ function configTool(ctx: Plugin.Context) {
   return {
     name: CONFIG_TOOL_NAME,
     description:
-      "View or change ctx-guard's lossy tool-output transforms. compression = " +
+      "View or change parsnip's lossy tool-output transforms. compression = " +
       "head+tail truncation of oversized shell output; selector = which " +
       "compression backend to use; dedup = collapse a repeated identical large " +
       "result to a marker. minChars = compression threshold in characters " +
@@ -445,8 +445,8 @@ function configTool(ctx: Plugin.Context) {
       ])
       const effective = resolveConfig(globalOverride, sessionOverride)
       const headline = changed
-        ? `ctx-guard config updated (scope: ${scope}${reset ? ", reset" : ""})`
-        : "ctx-guard config"
+        ? `parsnip config updated (scope: ${scope}${reset ? ", reset" : ""})`
+        : "parsnip config"
       return {
         content: [
           {
@@ -463,7 +463,7 @@ function configTool(ctx: Plugin.Context) {
   }
 }
 
-const RECALL_TOOL_NAME = "ctxguard_recall"
+const RECALL_TOOL_NAME = "parsnip_recall"
 
 /**
  * Agent-facing recall, added to the tool catalog via `ctx.tool.transform`.
@@ -474,7 +474,7 @@ function recallTool(ctx: Plugin.Context) {
   return {
     name: RECALL_TOOL_NAME,
     description:
-      "Retrieve the full text ctx-guard dropped when it compressed an oversized " +
+      "Retrieve the full text parsnip dropped when it compressed an oversized " +
       "tool result. Compression is lossy to the prompt but lossless here: the " +
       "omission marker names a recall id — pass it to get the original bytes back. " +
       "Use when a compressed result looks like it may be missing something you need.",
@@ -492,28 +492,28 @@ function recallTool(ctx: Plugin.Context) {
       const state = await loadRecall(ctx.storage, toolContext.sessionID)
       const entry = state.entries.find((e) => e.id === id)
       const text = entry
-        ? `ctx-guard recall ${id} — ${entry.inputChars} chars, tool ${entry.tool}:\n\n${entry.text}`
-        : `ctx-guard: no cached text for ${id || "(no id given)"} — it may have been evicted, or the id is wrong.`
+        ? `parsnip recall ${id} — ${entry.inputChars} chars, tool ${entry.tool}:\n\n${entry.text}`
+        : `parsnip: no cached text for ${id || "(no id given)"} — it may have been evicted, or the id is wrong.`
       return { content: [{ type: "text", text }] }
     },
   }
 }
 
 /**
- * Human-facing toggle: `/ctx-guard compression off`, `/ctx-guard dedup on
- * session`, `/ctx-guard reset`. A V2 command cannot return output, so this
- * applies the change silently — confirm by calling the `ctxguard_config` tool.
+ * Human-facing toggle: `/parsnip compression off`, `/parsnip dedup on
+ * session`, `/parsnip reset`. A V2 command cannot return output, so this
+ * applies the change silently — confirm by calling the `parsnip_config` tool.
  */
 function configCommand(ctx: Plugin.Context) {
   return {
-    name: "ctx-guard",
+    name: "parsnip",
     description:
-      "View or change ctx-guard compression/dedup/selector: `/ctx-guard compression off`, " +
-      "`/ctx-guard dedup on`, `/ctx-guard selector head-tail`, " +
-      "`/ctx-guard threshold 1500` (or `default`), " +
-      "`/ctx-guard reset [session]`. Add `session` to scope to this session only. " +
-      "`/ctx-guard recall <id>` looks up the full text a compression dropped (the " +
-      "agent-facing path is the `ctxguard_recall` tool).",
+      "View or change parsnip compression/dedup/selector: `/parsnip compression off`, " +
+      "`/parsnip dedup on`, `/parsnip selector head-tail`, " +
+      "`/parsnip threshold 1500` (or `default`), " +
+      "`/parsnip reset [session]`. Add `session` to scope to this session only. " +
+      "`/parsnip recall <id>` looks up the full text a compression dropped (the " +
+      "agent-facing path is the `parsnip_recall` tool).",
     execute: async (invocation: { sessionID: string; prompt: unknown }) => {
       const tokens = promptText(invocation.prompt).trim().toLowerCase().split(/\s+/).filter(Boolean)
       if (tokens.length === 0) return
@@ -526,9 +526,9 @@ function configCommand(ctx: Plugin.Context) {
         const state = await loadRecall(ctx.storage, invocation.sessionID)
         const entry = state.entries.find((e) => e.id === id)
         // A V2 command cannot return output; log the outcome for the operator
-        // (the `ctxguard_recall` tool is the agent-facing retrieval path).
+        // (the `parsnip_recall` tool is the agent-facing retrieval path).
         console.error(
-          `[ctx-guard] recall ${id ?? "(no id)"}: ${entry ? `${entry.text.length} chars` : "not found"}`,
+          `[parsnip] recall ${id ?? "(no id)"}: ${entry ? `${entry.text.length} chars` : "not found"}`,
         )
         return
       }
@@ -540,7 +540,7 @@ function configCommand(ctx: Plugin.Context) {
       }
 
       if (words[0] === "threshold") {
-        // `/ctx-guard threshold 1500` (or `default` to hand the selector back its own).
+        // `/parsnip threshold 1500` (or `default` to hand the selector back its own).
         const raw = words[1]
         const patch: ConfigOverride = {}
         if (raw === "default") patch.minChars = undefined
@@ -575,7 +575,20 @@ function configCommand(ctx: Plugin.Context) {
   }
 }
 
-const ctxGuard: Plugin.Plugin = {
+const parsnip: Plugin.Plugin = {
+  /**
+   * Deliberately NOT the product name (`parsnip`).
+   *
+   * OpenCode namespaces plugin storage as `plugin:<utf16-hex(id)>:`, so this
+   * string is the persistence namespace for everything the plugin records:
+   * per-session recall (the full pre-compression text of dropped results),
+   * savings, fidelity rings, dedup memory, usage and the structure report.
+   *
+   * Renaming it would silently orphan every existing key — the dropped text
+   * exists nowhere else and cannot be regenerated. The visible name lives in
+   * the repo, the directory, the tool names, the markers and the docs; this
+   * stays as-is. If it ever must change, migrate the `kv` rows first.
+   */
   id: "ctx-guard",
 
   setup: async (ctx: Plugin.Context) => {
@@ -839,7 +852,7 @@ const ctxGuard: Plugin.Plugin = {
                   event.sessionID,
                   addDedup(await loadSavings(ctx.storage, event.sessionID), text),
                 )
-                console.error(`[ctx-guard] savings session=${event.sessionID} event=dedup chars=${saved}`)
+                console.error(`[parsnip] savings session=${event.sessionID} event=dedup chars=${saved}`)
               }
               return
             }
@@ -907,7 +920,7 @@ const ctxGuard: Plugin.Plugin = {
                 event.result = appendResultText(event.result, `\n${recallNote(recallId, entry.sample)}`)
 
                 console.error(
-                  `[ctx-guard] savings session=${event.sessionID} selector=${selector} event=compress chars=${omitted} recall=${recallId}`,
+                  `[parsnip] savings session=${event.sessionID} selector=${selector} event=compress chars=${omitted} recall=${recallId}`,
                 )
               }
             }
@@ -936,10 +949,10 @@ const ctxGuard: Plugin.Plugin = {
               try {
                 const removed = await pruneSession(ctx.storage, event.data.sessionID)
                 console.error(
-                  `[ctx-guard] pruned ${removed} storage key(s) for deleted session ${event.data.sessionID}`,
+                  `[parsnip] pruned ${removed} storage key(s) for deleted session ${event.data.sessionID}`,
                 )
               } catch (error) {
-                console.error("[ctx-guard] session prune failed (ignored):", error)
+                console.error("[parsnip] session prune failed (ignored):", error)
               }
               continue
             }
@@ -951,18 +964,18 @@ const ctxGuard: Plugin.Plugin = {
                 tokenUsageFrom(event.data.tokens, event.data.cost),
               )
             } catch (error) {
-              console.error("[ctx-guard] usage capture failed (ignored):", error)
+              console.error("[parsnip] usage capture failed (ignored):", error)
             }
           }
         } catch (error) {
           // An abort ends the iterator normally; anything else is logged, not thrown.
           if (!usageAbort.signal.aborted) {
-            console.error("[ctx-guard] event stream ended (ignored):", error)
+            console.error("[parsnip] event stream ended (ignored):", error)
           }
         }
       })()
     } catch (error) {
-      console.error("[ctx-guard] event subscription failed (ignored):", error)
+      console.error("[parsnip] event subscription failed (ignored):", error)
     }
 
     return async () => {
@@ -978,4 +991,4 @@ const ctxGuard: Plugin.Plugin = {
   },
 }
 
-export default ctxGuard
+export default parsnip
