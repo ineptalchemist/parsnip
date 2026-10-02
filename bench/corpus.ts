@@ -121,6 +121,26 @@ export const CORPUS: CorpusItem[] = [
       return lines.join("\n")
     })(),
   },
+  {
+    // The shape a `web_fetch` of a docs page or blog post arrives in. Every
+    // line is unique, so there is no run for log-compact to collapse and no
+    // repeated shape to lean on — the axis is "prose has no redundancy".
+    //
+    // NOTE on reading this row: `novel-x` is SATURATED here and cannot
+    // discriminate between selectors. On prose every line is novel by
+    // definition, so novel-x retention is capped at the kept fraction for all
+    // of them. Judge this item on ratio, identifier retention and `frag`;
+    // planted-fact recovery lives in the eval corpus instead.
+    name: "long-form article (prose)",
+    axis: "prose",
+    text: Array.from(
+      { length: 46 },
+      (_, i) =>
+        `Section ${i + 1}. The retrieval pipeline normalises each document before it is scored. ` +
+        `Passage ${i} expands on how ${["ordering", "caching", "idempotence", "recovery", "observability", "eviction"][i % 6]} ` +
+        `behaves once the underlying store starts to degrade, and sets out the trade-off the maintainers settled on.`,
+    ).join("\n\n"),
+  },
 ]
 
 /**

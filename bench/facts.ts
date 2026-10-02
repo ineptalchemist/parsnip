@@ -218,6 +218,99 @@ function timestampedLog(): CorpusItem {
   }
 }
 
+// --- 7. long-form technical article (prose) ---------------------------------
+//
+// The shapes above are logs, diffs and JSON — line-oriented, and every line
+// shares a shape with its neighbours. Prose is the opposite case: each
+// paragraph is a unique line, so there is no run to collapse and no repeated
+// shape to lean on. It is also the shape a `web_fetch` of a documentation page
+// or a blog post actually arrives in, so it is the one the corpus was missing.
+//
+// Fact wording is deliberately PLAIN — no "CRITICAL", no "ERROR", no
+// `file:line`, no hash. An earlier draft planted them as "CRITICAL FINDING …",
+// which classified them as `signal` and made the fixture circular: it handed
+// `signal-preserving` a fact wearing its own pattern. These read as ordinary
+// sentences, so the class is decided by shape, not by vocabulary.
+
+function article(): CorpusItem {
+  const paras = range(
+    44,
+    (i) =>
+      `Section ${i + 1}. The retrieval pipeline normalises each document before it is scored. ` +
+      `Passage ${i} expands on how ${["ordering", "caching", "idempotence", "recovery", "observability", "eviction"][i % 6]} ` +
+      `behaves once the underlying store starts to degrade, and sets out the trade-off the maintainers settled on. ` +
+      `The trade-off has held since the rewrite, though the reasoning behind it is not recorded anywhere else.`,
+  )
+  paras[3] =
+    "Section 4. A document may nest at most twelve levels before the tree is flattened, because the scorer walks it recursively."
+  paras[16] =
+    "Section 17. Shard keys must be salted per tenant, or recall for small tenants collapses to zero."
+  paras[29] =
+    "Section 30. The rerank pool holds four hundred candidates on the large tier, which is the ceiling."
+  paras[40] =
+    "Section 41. Under sustained load the endpoint answers 429 rather than 503, which several clients misread as a server fault."
+  return {
+    name: "technical article (long-form prose)",
+    task: "What limits does the retrieval pipeline impose, and why?",
+    text: paras.join("\n\n"),
+    facts: [
+      { text: "nest at most twelve levels", label: "value", band: "head" },
+      { text: "salted per tenant", label: "value", band: "middle" },
+      { text: "four hundred candidates", label: "value", band: "middle" },
+      { text: "answers 429 rather than 503", label: "value", band: "tail" },
+    ],
+  }
+}
+
+// --- 8. documentation page (prose + code) ----------------------------------
+//
+// The shape a `web_fetch` returns when it lands on an API reference: prose
+// interleaved with fenced code and signatures. Distinct from item 7 because the
+// code lines carry a dense identifier load that prose does not, so a selector
+// that ranks by "what looks unusual" has to separate a real identifier from a
+// syntax-highlighted keyword.
+
+function docsPage(): CorpusItem {
+  const paras = range(
+    38,
+    (i) =>
+      `## Configuration ${i + 1}\n\n` +
+      `The client accepts several knobs, each documented below. Values are read once at ` +
+      `construction time and are not revalidated afterwards, which surprises people more often ` +
+      `than it should. Set them before the first request rather than after.\n\n` +
+      "```ts\n" +
+      `const client = createClient({ region: "eu-west-1", retries: ${(i % 5) + 1}, timeoutMs: ${(i + 1) * 250} })\n` +
+      "```",
+  )
+  paras[2] =
+    "## Configuration 3\n\n" +
+    "The client accepts several knobs, each documented below. Values are read once at construction time.\n\n" +
+    "The shard selector was replaced by a placement group name, and the old option no longer does anything."
+  paras[15] =
+    "## Configuration 16\n\n" +
+    "Connection strings may embed credentials, though the SDK now prefers an environment variable.\n\n" +
+    "The wire format moved to a length-prefixed framing in version four, so peers must agree on the major number."
+  paras[28] =
+    "## Configuration 29\n\n" +
+    "Retries use capped exponential backoff with full jitter, not a fixed interval.\n\n" +
+    "A single account is limited to two hundred concurrent streams, which is a hard cap rather than a default."
+  paras[35] =
+    "## Configuration 36\n\n" +
+    "The default region resolves from the ambient cloud metadata service at construction time.\n\n" +
+    "See the migration guide at https://docs.example.com/sdk/v4-migration before upgrading."
+  return {
+    name: "docs page (prose + code samples)",
+    task: "Which breaking changes and limits does this SDK have?",
+    text: paras.join("\n\n"),
+    facts: [
+      { text: "no longer does anything", label: "value", band: "head" },
+      { text: "must agree on the major number", label: "value", band: "middle" },
+      { text: "two hundred concurrent streams", label: "value", band: "middle" },
+      { text: "https://docs.example.com/sdk/v4-migration", label: "url", band: "tail" },
+    ],
+  }
+}
+
 export const FACT_CORPUS: readonly CorpusItem[] = [
   buildLog(),
   stackTrace(),
@@ -225,4 +318,6 @@ export const FACT_CORPUS: readonly CorpusItem[] = [
   apiResponse(),
   dependencyList(),
   timestampedLog(),
+  article(),
+  docsPage(),
 ]
