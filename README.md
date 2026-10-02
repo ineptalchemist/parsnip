@@ -139,7 +139,8 @@ bench/
   lib/proxies.ts        pure proxies: signal/identifier/novel retention + fragments
   lib/recovery.ts       pure known-answer recovery scoring
   lib/laya.ts           pure Laya-scored selection (consumes a relevance map; no dependency)
-  read-savings.ts       dump per-session tokens + char savings from opencode.db
+  read-savings.ts       dump per-session tokens + static/reread char savings
+  lib/reread.ts         the reread multiplier (chars × later model calls; pure)
 ```
 
 ## How it loads
@@ -259,6 +260,28 @@ below were found.
 because plugin `console.log`/`console.error` does *not* reach `opencode.log`.
 The old `~chars / 4` "token estimate" was an uncalibrated guess and has been
 removed in favour of the measured `session.usage.updated` numbers.
+
+### Static vs reread — why the two char numbers differ
+
+Each session reports two char figures, and they measure different things:
+
+- **`static`** — characters removed from the transcript *once*.
+- **`reread`** — characters that were then **never re-transmitted**. Every model
+  call re-sends the whole prompt, and the prompt is now permanently shorter, so
+  each removed character would otherwise have been paid for on every later call.
+  A compression made early is worth many times one made at the end.
+
+The multiplier between them (`chars ÷ chars`, so no token guess is involved) is
+the honest measure of the plugin's effect, and it runs **well above 1x** —
+currently ~90x across all recorded sessions, i.e. the static figure understates
+the real saving by roughly two orders of magnitude.
+
+Computed in `bench/lib/reread.ts` from the per-compression timestamps in
+`session:<id>:compressions` and the session's assistant-message timeline in
+`session_message`. An assistant message with K tool parts counts as K+1
+invocations, so the figure is a **lower bound**. Dedup is excluded — only an
+aggregate is stored, with no per-event timestamps to weight — so it contributes
+to `static` alone.
 
 **Read this before judging the savings numbers:** native `tool_output`
 truncation (`max_lines: 500` / `max_bytes: 20 000`) runs *before*
