@@ -11,6 +11,7 @@ import assert from "node:assert/strict"
 import ctxGuard, { guarded } from "./index.ts"
 import { DEDUP_MARKER, compressResult, textLengthOf } from "./lib/toolhooks.ts"
 import { headTail } from "./lib/selectors.ts"
+import { effectiveConfig } from "./lib/config.ts"
 
 type AnyRecord = Record<string, any>
 
@@ -1039,6 +1040,22 @@ test("config tool: a change records a decision; a bare view does not", async () 
   await added[0].execute({ compression: true, selector: "extractive" }, { sessionID: "ses_test" })
   const state = h.store.get("session:ses_test") as AnyRecord
   assert.deepEqual(state.decisions, ["ctx-guard: compression on, selector extractive (global)"])
+})
+
+test("config tool: minChars alone is both applied and recorded", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+
+  await added[0].execute({ minChars: 1500 }, { sessionID: "ses_test" })
+  assert.deepEqual(h.store.get("ctx-guard:config"), { minChars: 1500 }, "the setting was written")
+  const state = h.store.get("session:ses_test") as AnyRecord
+  assert.deepEqual(state.decisions, ["ctx-guard: threshold 1500 (global)"], "and it left a trace")
+
+  // The value must survive the read path the hook actually uses.
+  assert.equal((await effectiveConfig(h.ctx.storage, "ses_test")).minChars, 1500)
 })
 
 test("config command: records a decision, preserving the other fields", async () => {

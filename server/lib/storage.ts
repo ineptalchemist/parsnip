@@ -114,9 +114,13 @@ export function appendActiveFile(
 /**
  * Render a config change as a one-line decision. Only *explicit* toggles count:
  * a bare view writes nothing, so there is nothing to record for it.
+ *
+ * Every field that `applyConfigPatch` accepts must be handled here, or a change
+ * to that field is applied but leaves no trace in the continuity block — the
+ * session that compacts later cannot tell the threshold or selector was moved.
  */
 export function describeDecision(
-  patch: { compression?: boolean; dedup?: boolean; selector?: string },
+  patch: { compression?: boolean; dedup?: boolean; selector?: string; minChars?: number },
   scope: string,
   reset = false,
 ): string {
@@ -127,6 +131,10 @@ export function describeDecision(
   }
   if (typeof patch.dedup === "boolean") parts.push(`dedup ${patch.dedup ? "on" : "off"}`)
   if (patch.selector) parts.push(`selector ${patch.selector}`)
+  // Presence, not `typeof`: `/ctx-guard threshold default` hands back an explicit
+  // `minChars: undefined`, and handing the threshold back to its own default is
+  // a real decision — indistinguishable from "field absent" otherwise.
+  if ("minChars" in patch) parts.push(`threshold ${patch.minChars ?? "default"}`)
   if (parts.length === 0) return ""
   return `ctx-guard: ${parts.join(", ")} (${scope})`
 }

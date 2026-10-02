@@ -245,6 +245,19 @@ test("describeDecision: renders only explicit changes", () => {
   assert.equal(describeDecision({}, "global"), "", "an empty patch is not a decision")
 })
 
+test("describeDecision: records a threshold change", () => {
+  assert.equal(describeDecision({ minChars: 1500 }, "global"), "ctx-guard: threshold 1500 (global)")
+  assert.equal(
+    describeDecision({ selector: "log-compact", minChars: 800 }, "session"),
+    "ctx-guard: selector log-compact, threshold 800 (session)",
+  )
+  assert.equal(
+    describeDecision({ minChars: undefined }, "global"),
+    "ctx-guard: threshold default (global)",
+    "handing the threshold back to its own default is a decision, not a no-op",
+  )
+})
+
 test("appendDecision: dedupes, bounds, and reports no-change", () => {
   assert.deepEqual(appendDecision([], "d1"), ["d1"])
   assert.equal(appendDecision(["d1"], "d1"), undefined, "a repeat is not a change")
