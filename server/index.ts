@@ -45,7 +45,10 @@ import {
   type ContinuityState,
 } from "./lib/storage.ts"
 import {
+  MAX_CHARS_LIMIT,
+  MIN_CHARS_LIMIT,
   applyConfigPatch,
+  asMinChars,
   describeConfig,
   effectiveConfig,
   loadGlobalConfig,
@@ -381,7 +384,10 @@ function configTool(ctx: Plugin.Context) {
       "View or change ctx-guard's lossy tool-output transforms. compression = " +
       "head+tail truncation of oversized shell output; selector = which " +
       "compression backend to use; dedup = collapse a repeated identical large " +
-      "result to a marker. Set session:true to scope a change to the current " +
+      "result to a marker. minChars = compression threshold in characters " +
+      "(default 4000; range 800-200000), which also sets how much is kept: " +
+      "40% from the front, 30% from the back. " +
+      "Set session:true to scope a change to the current " +
       "session only (e.g. while doing critical work); otherwise it is global. " +
       "Values persist across restarts.",
     input: {
@@ -394,6 +400,14 @@ function configTool(ctx: Plugin.Context) {
           description: "Compression method used when compression is on (default head-tail).",
         },
         dedup: { type: "boolean", description: "Enable/disable duplicate suppression." },
+        minChars: {
+          type: "integer",
+          minimum: MIN_CHARS_LIMIT,
+          maximum: MAX_CHARS_LIMIT,
+          description:
+            "Compression threshold in characters (default 4000). Also sets the kept budget: " +
+            "40% head, 30% tail. Lower to compact mid-sized results too.",
+        },
         session: { type: "boolean", description: "Scope the change to this session (default: global)." },
         reset: { type: "boolean", description: "Clear the override at the chosen scope (revert to defaults)." },
       },
@@ -408,13 +422,18 @@ function configTool(ctx: Plugin.Context) {
       if (typeof input.compression === "boolean") patch.compression = input.compression
       if (isSelectorName(input.selector)) patch.selector = input.selector
       if (typeof input.dedup === "boolean") patch.dedup = input.dedup
+      const minChars = asMinChars(input.minChars)
+      if (minChars !== undefined) patch.minChars = minChars
 
-      // A bare view writes nothing.
+      // A bare view writes nothing. Every field that can appear in `patch` must
+      // be listed here: a field set but not checked reads as "no change" and the
+      // setting is silently dropped.
       const changed =
         reset ||
         patch.compression !== undefined ||
         patch.selector !== undefined ||
-        patch.dedup !== undefined
+        patch.dedup !== undefined ||
+        patch.minChars !== undefined
       if (changed) {
         await applyConfigPatch(ctx.storage, toolContext.sessionID, patch, { scope, reset })
         await recordConfigDecision(ctx, toolContext.sessionID, patch, scope, reset)
@@ -491,6 +510,7 @@ function configCommand(ctx: Plugin.Context) {
     description:
       "View or change ctx-guard compression/dedup/selector: `/ctx-guard compression off`, " +
       "`/ctx-guard dedup on`, `/ctx-guard selector head-tail`, " +
+      "`/ctx-guard threshold 1500` (or `default`), " +
       "`/ctx-guard reset [session]`. Add `session` to scope to this session only. " +
       "`/ctx-guard recall <id>` looks up the full text a compression dropped (the " +
       "agent-facing path is the `ctxguard_recall` tool).",
@@ -516,6 +536,21 @@ function configCommand(ctx: Plugin.Context) {
       if (words[0] === "reset") {
         await applyConfigPatch(ctx.storage, invocation.sessionID, {}, { scope, reset: true })
         await recordConfigDecision(ctx, invocation.sessionID, {}, scope, true)
+        return
+      }
+
+      if (words[0] === "threshold") {
+        // `/ctx-guard threshold 1500` (or `default` to hand the selector back its own).
+        const raw = words[1]
+        const patch: ConfigOverride = {}
+        if (raw === "default") patch.minChars = undefined
+        else {
+          const minChars = asMinChars(Number(raw))
+          if (minChars === undefined) return // silent on an out-of-range threshold
+          patch.minChars = minChars
+        }
+        await applyConfigPatch(ctx.storage, invocation.sessionID, patch, { scope })
+        await recordConfigDecision(ctx, invocation.sessionID, patch, scope)
         return
       }
 
@@ -815,7 +850,10 @@ const ctxGuard: Plugin.Plugin = {
           // about to be committed is rewritten — never the transcript.
           if (config.compression) {
             const selector = config.selector
-            const compressed = compressResult(event.result, (part) => selectWith(selector, part))
+            const threshold = config.minChars
+            const compressed = compressResult(event.result, (part) =>
+              selectWith(selector, part, threshold),
+            )
             if (compressed !== event.result) {
               // Capture the pre-compression text for the fidelity diff, then
               // mutate first (the primary job) and measure best-effort: a

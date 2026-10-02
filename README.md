@@ -53,6 +53,14 @@ Implemented (server side):
   `ctxguard_config { selector }` or `/ctx-guard selector <name>` — the hook
   never changes.
 
+  The **threshold** is settable too, and it moves the kept budget with it:
+  `budgetFor(minChars)` derives head as 40% and tail as 30% of the threshold,
+  so the effective floor is 0.7 x the threshold (2800 default, 1050 at 1500).
+  Set it with `ctxguard_config { minChars }` or `/ctx-guard threshold 1500`
+  (range 800-200000; out-of-range is rejected, not clamped). Before this the
+  budget was frozen at 2800 whatever the gate said, so any lower threshold
+  was silently inert.
+
   | Selector | Behaviour | Reach for it when |
   |---|---|---|
   | `head-tail` *(default)* | Head + tail with a counted omission marker | You want the predictable baseline |

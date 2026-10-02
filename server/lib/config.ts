@@ -25,6 +25,8 @@ export type CtxGuardConfig = {
   dedup: boolean
   /** Which compression selector runs when `compression` is on. */
   selector: SelectorName
+  /** Compression threshold in chars; undefined = the selector's own default. */
+  minChars?: number
 }
 
 /** A partial override; an absent field falls through to the next level. */
@@ -32,6 +34,28 @@ export type ConfigOverride = {
   compression?: boolean
   dedup?: boolean
   selector?: SelectorName
+  minChars?: number
+}
+
+/** Smallest threshold accepted. Below it the derived budget leaves almost nothing. */
+export const MIN_CHARS_LIMIT = 800
+
+/** Largest threshold accepted — above this nothing is ever compressed. */
+export const MAX_CHARS_LIMIT = 200_000
+
+/**
+ * Narrow a stored threshold to a usable integer in range.
+ *
+ * Rejected rather than clamped: a value mangled by a bad write (1500 -> 150)
+ * should fall back to the selector default, not silently become a wildly
+ * different setting. Non-integers are floored — a threshold is a character
+ * count, so 1500.7 is not distinct from 1500.
+ */
+export function asMinChars(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined
+  const floored = Math.floor(value)
+  if (floored < MIN_CHARS_LIMIT || floored > MAX_CHARS_LIMIT) return undefined
+  return floored
 }
 
 /** Used when neither the session nor the global override sets a field. */
@@ -57,6 +81,8 @@ export function asConfigOverride(value: unknown): ConfigOverride {
   if (typeof v.compression === "boolean") out.compression = v.compression
   if (typeof v.dedup === "boolean") out.dedup = v.dedup
   if (isSelectorName(v.selector)) out.selector = v.selector
+  const minChars = asMinChars(v.minChars)
+  if (minChars !== undefined) out.minChars = minChars
   return out
 }
 
@@ -74,12 +100,17 @@ export function resolveConfig(
     compression: sessionOverride.compression ?? globalOverride.compression ?? defaults.compression,
     dedup: sessionOverride.dedup ?? globalOverride.dedup ?? defaults.dedup,
     selector: sessionOverride.selector ?? globalOverride.selector ?? defaults.selector,
+    minChars: sessionOverride.minChars ?? globalOverride.minChars ?? defaults.minChars,
   }
 }
 
 /** Human/agent-readable one-line summary of a config. */
 export function describeConfig(config: CtxGuardConfig): string {
-  return `compression ${config.compression ? "on" : "off"}, dedup ${config.dedup ? "on" : "off"}, selector ${config.selector}`
+  const threshold = config.minChars === undefined ? "default" : `${config.minChars} chars`
+  return (
+    `compression ${config.compression ? "on" : "off"}, dedup ${config.dedup ? "on" : "off"}, ` +
+    `selector ${config.selector}, threshold ${threshold}`
+  )
 }
 
 // --- Storage (ctx.storage; the SDK type is type-only) -----------------------
