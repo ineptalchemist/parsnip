@@ -204,6 +204,7 @@ Three ledgers are recorded in `ctx.storage`, and they measure different things.
    and attribute a failure to a selector. The dropped region is reconstructed
    from the longest common prefix/suffix of input and output — exact for
    `head-tail`, best-effort for reordering selectors.
+
 ### Offline, deterministic
 
 These run against `bench/` corpora rather than your sessions. They are how the
