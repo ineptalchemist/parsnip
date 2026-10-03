@@ -7,6 +7,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   PRUNE_OPTIONS,
+  SKILL_CATALOG_COMPLETE,
   SKILL_USAGE_LIMIT,
   STRUCTURE_PRUNE_ENABLED,
   applyPrunePlan,
@@ -40,8 +41,11 @@ function makeStorage() {
   }
 }
 
+// Mirrors the live `opencode.jsonc`: basic-memory is the one MCP configured with
+// `codemode: false`. Every other server inherits the schema default,
+// `codemode: true`, so its tools are reachable only through `execute`.
 const servers: ServerEntry[] = [
-  { name: "basic-memory", type: "local", disabled: false, status: "connected" },
+  { name: "basic-memory", type: "local", disabled: false, status: "connected", codemode: false },
   { name: "firecrawl", type: "remote", disabled: false, status: "connected" },
   { name: "taproot", type: "local", disabled: false, status: "failed" },
   { name: "n8n", type: "remote", disabled: false, status: "needs_auth" },
@@ -121,7 +125,38 @@ test("classifyServers: an unobserved status is neither used nor unusable", () =>
     disabled: false,
     used: false,
     unusable: false,
+    usageKnown: false,
   })
+})
+
+// --- observability (usageKnown) ----------------------------------------------
+//
+// The regression this guards: `used` was measured false for every server in
+// every one of 57 sessions. A code-mode server's calls cannot be seen at all, so
+// `used: false` there means "cannot tell", not "dead weight".
+
+test("classifyServers: a code-mode server's usage is unobservable", () => {
+  const report = classifyServers(servers, new Set())
+  const byName = new Map(report.map((server) => [server.name, server]))
+
+  // `codemode` is absent on firecrawl/parallel, and the schema default is true.
+  assert.equal(byName.get("firecrawl")?.usageKnown, false)
+  assert.equal(byName.get("parallel")?.usageKnown, false)
+  // basic-memory is configured `codemode: false`, so its calls are observable.
+  assert.equal(byName.get("basic-memory")?.usageKnown, true)
+})
+
+test("classifyServers: observing a call proves usage even for a code-mode server", () => {
+  const report = classifyServers(servers, new Set(["firecrawl_scrape"]))
+  const firecrawl = report.find((server) => server.name === "firecrawl")
+  assert.equal(firecrawl?.used, true)
+  assert.equal(firecrawl?.usageKnown, true)
+})
+
+test("classifySkills: usage is never known, because the catalog is incomplete", () => {
+  const report = classifySkills(skills, new Set(["report"]))
+  assert.equal(SKILL_CATALOG_COMPLETE, false)
+  for (const skill of report) assert.equal(skill.usageKnown, false)
 })
 
 // --- classifySkills ---------------------------------------------------------
@@ -167,9 +202,12 @@ test("computeReport: defaults to dead weight only (unused or unusable)", () => {
     { tools: ["basic-memory_recent_activity"], skills: [] },
   )
 
+  // basic-memory is used, so it drops out. taproot/n8n are unusable, so they
+  // stay regardless. firecrawl and parallel are `used: false` but their usage
+  // was never observable, so they are NOT reported as dead weight.
   assert.deepEqual(
     report.servers.map((server) => server.name),
-    ["firecrawl", "taproot", "n8n", "parallel"],
+    ["taproot", "n8n"],
   )
   assert.deepEqual(
     report.skills.map((skill) => skill.id),
@@ -214,10 +252,28 @@ test("buildPrunePlan: unused servers are added only with that option", () => {
     unusedServers: true,
     unusedSkills: false,
   })
-  // basic-memory/taproot/n8n/parallel are unused; firecrawl is used in this report.
-  // The expected list is pre-sorted: "taproot" sorts after "parallel", which is
-  // why it cannot simply sit where "filterboy" used to.
-  assert.deepEqual(plan.servers.sort(), ["basic-memory", "n8n", "parallel", "taproot"])
+  // basic-memory is unused AND observable (`codemode: false`), so it qualifies.
+  // taproot/n8n are unusable. firecrawl is used in this report; parallel is
+  // `used: false` but unobservable, so it is never pruned on no evidence.
+  assert.deepEqual(plan.servers.sort(), ["basic-memory", "n8n", "taproot"])
+})
+
+test("buildPrunePlan: an unobservable server is never pruned, even with unusedServers on", () => {
+  const report = computeReport(servers, skills, { tools: [], skills: [] }, {
+    unusedServersOnly: false,
+    unusedSkillsOnly: false,
+  })
+  const plan = buildPrunePlan(report, {
+    enabled: true,
+    unusedServers: true,
+    unusedSkills: false,
+  })
+  const parallel = report.servers.find((server) => server.name === "parallel")
+  assert.equal(parallel?.used, false)
+  assert.equal(parallel?.usageKnown, false)
+  assert.equal(plan.servers.includes("parallel"), false, "must not disable a server we cannot see")
+  // The unusable pair still comes through: the strong signal needs no gate.
+  assert.deepEqual(plan.servers.sort(), ["basic-memory", "n8n", "taproot"])
 })
 
 test("buildPrunePlan: unused skills need an explicit opt-in", () => {
@@ -355,6 +411,27 @@ test("asStructureReport: round-trips a persisted report", () => {
   assert.equal(asStructureReport(undefined), undefined)
   assert.equal(asStructureReport({ servers: [] }), undefined)
   assert.deepEqual(asStructureReport(JSON.parse(JSON.stringify(fullReport))), fullReport)
+})
+
+test("asStructureReport: a pre-2026-10-03 report reads as unobservable, not as evidence", () => {
+  // Reports written before `usageKnown` existed carry exactly the unsupported
+  // `used: false` this change exists to distinguish. A missing flag must never
+  // be read back as support for the verdict.
+  const legacy = {
+    servers: [{ name: "parallel", type: "remote", disabled: false, status: "connected", used: false }],
+    skills: [{ id: "opencode", name: "OpenCode", autoinvoke: false, used: false }],
+    computedAt: 1,
+  }
+  const read = asStructureReport(legacy)
+  assert.equal(read?.servers[0].usageKnown, false)
+  assert.equal(read?.skills[0].usageKnown, false)
+
+  const plan = buildPrunePlan(read as StructureReport, {
+    enabled: true,
+    unusedServers: true,
+    unusedSkills: false,
+  })
+  assert.deepEqual(plan.servers, [], "legacy data must not authorise a prune")
 })
 
 test("structureKey: namespaced per session", () => {

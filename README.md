@@ -310,6 +310,15 @@ damage.
   The prune path is off by default, double-gated, and only ever sets
   `disabled: true` — never removes an entry, since removal would lose
   `command`/`url`/`oauth`.
+- **A `used: false` on a server is not evidence.** Every entry carries
+  `usageKnown`, and it is `false` whenever the server's calls could not have been
+  observed at all. `codemode` defaults to `true`, so a code-mode server's tools
+  are reachable only through `execute`, and the inner call never fires
+  `execute.before`. Measured over 57 sessions, `used` had been `false` for
+  *every* server in *every* session — it had never once been true. An
+  unobservable server is now excluded from the dead-weight report and can never
+  be pruned; only `unusable` (`failed` / `needs_auth`) stands on its own. Skills
+  are always `usageKnown: false`, because the SDK's skill catalog is incomplete.
 
 ## Development
 

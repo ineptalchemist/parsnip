@@ -162,13 +162,16 @@ async function resolveLimit(
  * prune so the stored report reflects what was actually applied.
  */
 function snapshotServers(
-  editor: { list(): readonly (readonly [string, { type?: string; disabled?: boolean }])[] },
+  editor: { list(): readonly (readonly [string, { type?: string; disabled?: boolean; codemode?: boolean }])[] },
   state: StructureState,
 ): void {
   state.catalog.servers = editor.list().map(([name, config]) => ({
     name,
     type: config.type === "local" ? "local" : "remote",
     disabled: config.disabled === true,
+    // Left undefined when absent, which is correct: the MCP schema defaults
+    // `codemode` to true, so an absent value means code mode.
+    codemode: config.codemode,
   }))
 }
 

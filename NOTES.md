@@ -184,10 +184,22 @@ aside first.
   `loadStructureReport` are tested and stable but nothing in production calls
   them — there is no UI surface yet. They exist so a future reader does not have
   to re-derive the stored shape.
+- **`used` was dead before 2026-10-03, and is now gated.** Over the 57 sessions
+  that recorded both a usage list and a report, `used` was `false` for every
+  server in every session — it had never been `true` once. The cause is
+  structural, not statistical: `codemode` defaults to `true`, so a code-mode
+  server's tools are reachable only through `execute` and the inner call never
+  fires `execute.before`. Every entry now carries `usageKnown`; an unobservable
+  server is dropped from the dead-weight report and can never be pruned. This is
+  what would have prevented the 2026-09-29 five-server flip. The fix is honest
+  reporting only — `used` is still not a usage *analysis*: it has no counts, no
+  cross-session history, and no time dimension.
 - **`PRUNE_OPTIONS.unusedServers` is a footgun.** With it on, enabling the flag
   disables *every* server unused in the approving session. This was observed
   live: all five configured servers flipped, three of them healthy. The strong
-  signal is `unusable` (`failed` / `needs_auth`), not "unused".
+  signal is `unusable` (`failed` / `needs_auth`), not "unused". The
+  `usageKnown` gate now removes the worst of this, but the option is still the
+  wrong default for a prune.
 - **`validThreshold` (floor 200) and `MIN_CHARS_LIMIT` (800) are separate
   bounds.** Duplicated deliberately while `selectors.ts` stays a leaf module, but
   they can drift.

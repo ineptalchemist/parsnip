@@ -23,6 +23,10 @@
  *    on 2.0.19: only the builtin skills appear, while the session prompt lists
  *    many more), so this is advisory only — never prune a skill.
  *
+ * Both weak signals are gated by `usageKnown` (see `ServerReport`), because a
+ * `used: false` on a server whose calls could not be observed is not a finding.
+ * The strong signal needs no such gate.
+ *
  * Everything except the storage helpers at the bottom is pure and unit-testable
  * under `node --test`; the SDK reference is a type-only import, so this module
  * adds no runtime dependency.
@@ -36,6 +40,13 @@ export type ServerEntry = {
   disabled: boolean
   /** Runtime status from `ctx.mcp.list()` — never available from the transform. */
   status?: string
+  /**
+   * Whether this server's tools are exposed through Code Mode. Read from the MCP
+   * server config, where **the SDK default is `true`** — so an absent value means
+   * code mode, not native tools. `undefined` is therefore the *least* observable
+   * case and must not be read as "no tools seen".
+   */
+  codemode?: boolean
 }
 
 export type SkillEntry = {
@@ -49,8 +60,47 @@ export type ToolUsage = {
   skills: string[]
 }
 
-export type ServerReport = ServerEntry & { used: boolean; unusable: boolean }
-export type SkillReport = SkillEntry & { used: boolean }
+/**
+ * `usageKnown` answers "could we have observed this at all?", and it is the
+ * field that makes the report honest.
+ *
+ * Before 2026-10-03 the report only had `used: boolean`, and `used: false` was
+ * read as "this server is dead weight". Measured over 57 sessions it was **false
+ * for every server, every time** — it had never once been true. Two distinct
+ * causes, both of which made `false` mean "we cannot tell":
+ *
+ *  1. **Code-mode servers are structurally invisible.** `codemode` defaults to
+ *     `true`, so such a server's tools are reachable *only* through the
+ *     `execute` tool. The inner call never fires `execute.before`, so its name
+ *     never reaches `session:<id>:toolUsage`. Confirmed live: a session that
+ *     called `parallel.web_search` and `firecrawl.scrape` through `execute`
+ *     recorded `execute` and nothing else.
+ *  2. **An absent catalog entry looked identical to an unused server.**
+ *
+ * So `used` is now only load-bearing when `usageKnown` is true, and neither the
+ * report filter nor the prune plan treats an unobserved server as dead weight.
+ */
+export type ServerReport = ServerEntry & {
+  used: boolean
+  unusable: boolean
+  /** False when this server's tool calls could not have been observed at all. */
+  usageKnown: boolean
+}
+
+export type SkillReport = SkillEntry & {
+  used: boolean
+  /** Always false — see `SKILL_CATALOG_COMPLETE`. */
+  usageKnown: boolean
+}
+
+/**
+ * The skill catalog surfaced by the SDK is **incomplete**: verified live, only
+ * the builtin skills appear while the session prompt lists many more. So a skill
+ * reading `used: false` may simply be invisible to the catalog rather than
+ * unused. Skills are report-only anyway (`Skill.Info` has no `disabled` field),
+ * but the flag keeps a future reader from treating the number as evidence.
+ */
+export const SKILL_CATALOG_COMPLETE = false
 
 export type StructureReport = {
   servers: ServerReport[]
@@ -77,9 +127,12 @@ export type PruneDiff = {
   skipped: string[]
 }
 
-/** Narrow editor surface the prune path needs; keeps the logic testable. */
+/**
+ * Narrow editor surface the prune path needs; keeps the logic testable.
+ * `codemode` is carried so the catalog snapshot can record observability.
+ */
 export type ServerEditorLike = {
-  list(): readonly (readonly [string, { disabled?: boolean }])[]
+  list(): readonly (readonly [string, { disabled?: boolean; codemode?: boolean }])[]
   update(name: string, update: (config: { disabled?: boolean }) => void): void
 }
 
@@ -165,7 +218,12 @@ export function classifyServers(
       }
     }
     const unusable = server.status !== undefined && UNUSABLE_STATUSES.includes(server.status)
-    return { ...server, used, unusable }
+    // Usage is observable only when the server's tools surface as native tool
+    // calls, i.e. `codemode: false`. Anything else reaches the model through
+    // `execute`, whose inner calls never fire `execute.before`. Seeing a call is
+    // itself proof, so `used: true` forces `usageKnown: true`.
+    const usageKnown = used || server.codemode === false
+    return { ...server, used, unusable, usageKnown }
   })
 }
 
@@ -180,6 +238,7 @@ export function classifySkills(
   return skills.map((skill) => ({
     ...skill,
     used: skill.autoinvoke || usedSkills.has(skill.id) || usedSkills.has(skill.name),
+    usageKnown: SKILL_CATALOG_COMPLETE,
   }))
 }
 
@@ -193,7 +252,15 @@ export const REPORT_OPTIONS: ReportOptions = {
   unusedSkillsOnly: true,
 }
 
-/** Assemble the per-session structure report. Tolerates empty inputs. */
+/**
+ * Assemble the per-session structure report. Tolerates empty inputs.
+ *
+ * The `unusedServersOnly` filter keeps a server when it is **unusable**, or when
+ * it is unused *and that verdict is supported* (`usageKnown`). An unobservable
+ * server is dropped rather than reported, because "we could not see whether it
+ * was used" is not the same claim as "you can turn this off" — and conflating
+ * them is what produced a five-server prune on healthy servers.
+ */
 export function computeReport(
   servers: readonly ServerEntry[],
   skills: readonly SkillEntry[],
@@ -205,7 +272,7 @@ export function computeReport(
 
   return {
     servers: options.unusedServersOnly
-      ? classifiedServers.filter((server) => server.unusable || !server.used)
+      ? classifiedServers.filter((server) => server.unusable || (!server.used && server.usageKnown))
       : classifiedServers,
     skills: options.unusedSkillsOnly
       ? classifiedSkills.filter((skill) => !skill.used)
@@ -214,7 +281,14 @@ export function computeReport(
   }
 }
 
-/** The list of entries the opt-in prune would disable. */
+/**
+ * The list of entries the opt-in prune would disable.
+ *
+ * `unusable` is the strong signal and is honoured on its own. `unusedServers`
+ * only adds a server when the unused verdict is *supported* (`usageKnown`);
+ * without that guard a code-mode server — invisible to `execute.before` — reads
+ * as unused and would be disabled on no evidence at all.
+ */
 export function buildPrunePlan(
   report: StructureReport,
   options: PruneOptions = PRUNE_OPTIONS,
@@ -223,7 +297,9 @@ export function buildPrunePlan(
   if (!options.enabled) return plan
 
   for (const server of report.servers) {
-    if (server.unusable || (options.unusedServers && !server.used)) plan.servers.push(server.name)
+    if (server.unusable || (options.unusedServers && !server.used && server.usageKnown)) {
+      plan.servers.push(server.name)
+    }
   }
   if (options.unusedSkills) {
     for (const skill of report.skills) {
@@ -347,19 +423,30 @@ export async function saveStructureReport(
 /**
  * Narrow stored JSON back to a `StructureReport`.
  *
- * Currently no production caller: the report is written per session but nothing
- * reads it back yet, because there is no UI surface for it (the TUI footer work
- * is not merged, and a sidebar panel is a separate plan). It exists — and is
- * tested — so that a future reader does not have to re-derive the stored shape,
- * and so a consumer can trust whatever it finds in `session:<id>:structure`.
+ * Reports written before 2026-10-03 have no `usageKnown` field, and their
+ * `used: false` is exactly the unsupported verdict this type now distinguishes.
+ * A missing flag is therefore read as `false` — old data is treated as
+ * unobservable, never as evidence.
+ *
+ * Still no production reader: the report is written per session but nothing
+ * reads it back, because the TUI footer that was meant to surface it is not
+ * built. It exists — and is tested — so a future reader does not have to
+ * re-derive the stored shape, and so a consumer can trust whatever it finds in
+ * `session:<id>:structure`.
  */
 export function asStructureReport(value: unknown): StructureReport | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
   const v = value as Record<string, unknown>
   if (!Array.isArray(v.servers) || !Array.isArray(v.skills)) return undefined
   return {
-    servers: v.servers as ServerReport[],
-    skills: v.skills as SkillReport[],
+    servers: (v.servers as ServerReport[]).map((server) => ({
+      ...server,
+      usageKnown: server?.usageKnown === true,
+    })),
+    skills: (v.skills as SkillReport[]).map((skill) => ({
+      ...skill,
+      usageKnown: skill?.usageKnown === true,
+    })),
     computedAt: typeof v.computedAt === "number" ? v.computedAt : 0,
   }
 }
