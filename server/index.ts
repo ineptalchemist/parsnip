@@ -13,8 +13,8 @@
  *   hooks is readonly; it is never mutated.
  *
  * Phase 3 adds no content-writing surface at all: the MCP/skill transforms only
- * *observe*, the tool hooks only record names, and the opt-in prune path (off by
- * default, double-gated) edits the MCP config — never the transcript.
+ * *observe*, and the tool hooks only record names. Nothing in this plugin edits
+ * configuration — the structural prune that used to was removed 2026-10-03.
  *
  * The default export is a plain `{ id, setup }` object (what `Plugin.define`
  * returns). All SDK references are `import type`, so nothing is resolved at
@@ -58,14 +58,8 @@ import {
   type ConfigScope,
 } from "./lib/config.ts"
 import {
-  PRUNE_OPTIONS,
-  STRUCTURE_PRUNE_ENABLED,
-  applyPrunePlan,
-  buildPrunePlan,
   computeReport,
-  isPruneApproved,
   loadUsage,
-  recordPruneDiff,
   recordToolUsage,
   saveStructureReport,
   skillIdOf,
@@ -104,16 +98,14 @@ const DEFAULT_CONTEXT_LIMIT = 200_000
 
 /**
  * Phase 3 state, created per `setup()` call — i.e. rebuilt on every hot reload,
- * and isolated between plugin instances. Nothing durable lives here: usage,
- * reports and prune diffs all go to `ctx.storage`.
+ * and isolated between plugin instances. Nothing durable lives here: usage and
+ * reports all go to `ctx.storage`.
  */
 type StructureState = {
   /** Latest read-only catalog snapshot from the transform callbacks. */
   catalog: { servers: ServerEntry[]; skills: SkillEntry[] }
   /** Status is NOT in the transform config — only `ctx.mcp.list()` carries it. */
   statusCache?: { at: number; statuses: Map<string, string> }
-  /** The session that asked for (and was approved for) a prune, if any. */
-  pruneIntent?: { sessionID: string }
   /** Last session whose usage was read, so repeat tool calls skip storage. */
   usageCache?: { sessionID: string; usage: ToolUsage }
 }
@@ -158,8 +150,7 @@ async function resolveLimit(
 
 /**
  * Snapshot the MCP catalog read-only. Taken inside the transform callback, i.e.
- * during a config build — never in a session hook. Called again after an opt-in
- * prune so the stored report reflects what was actually applied.
+ * during a config build — never in a session hook.
  */
 function snapshotServers(
   editor: { list(): readonly (readonly [string, { type?: string; disabled?: boolean; codemode?: boolean }])[] },
@@ -612,43 +603,19 @@ const parsnip: Plugin.Plugin = {
       ),
     )
 
-    // --- MCP catalog (read-only) + opt-in prune -----------------------------
-    // The snapshot is always taken. Pruning happens only when the feature flag
-    // is on AND this session was explicitly approved by the owner (see the
-    // `context` hook below); even then it only ever sets `disabled: true`.
+    // --- MCP catalog (read-only) --------------------------------------------
+    // The snapshot is always taken; that is the whole job. The prune that used
+    // to live here was removed 2026-10-03 — this plugin edits no config.
     await register(registrations, "mcp.transform", () =>
       ctx.mcp.transform(
         guarded("mcp.transform", (editor: MCPEditor) => {
           snapshotServers(editor, state)
-
-          if (!STRUCTURE_PRUNE_ENABLED || !state.pruneIntent) return
-          const sessionID = state.pruneIntent.sessionID
-          const usage =
-            state.usageCache?.sessionID === sessionID
-              ? state.usageCache.usage
-              : { tools: [], skills: [] }
-          const report = computeReport(state.catalog.servers, state.catalog.skills, usage, {
-            unusedServersOnly: false,
-            unusedSkillsOnly: false,
-          })
-          const diff = applyPrunePlan(editor, buildPrunePlan(report, PRUNE_OPTIONS))
-
-          // Re-snapshot: the report must reflect what was just applied.
-          snapshotServers(editor, state)
-
-          // Only a real flip (false -> true) is worth recording.
-          const changed = diff.changes.filter((change) => !change.before.disabled)
-          if (changed.length === 0) return
-          void recordPruneDiff(ctx.storage, sessionID, { ...diff, changes: changed }).catch(
-            () => {},
-          )
         }),
       ),
     )
 
     // --- Skill catalog (read-only) ------------------------------------------
-    // Skills are report-only: `Skill.Info` has no reversible off-switch, so the
-    // prune path never touches them.
+    // Skills are report-only: `Skill.Info` has no reversible off-switch.
     await register(registrations, "skill.transform", () =>
       ctx.skill.transform(
         guarded("skill.transform", (editor: SkillEditor) => {
@@ -724,21 +691,6 @@ const parsnip: Plugin.Plugin = {
             lastCommand: previous?.lastCommand,
           }
           await saveContinuity(ctx.storage, event.sessionID, next)
-
-          // Phase 3: the owner may approve a one-shot structural prune for this
-          // session. The plugin never sets the flag; with the feature disabled
-          // (the default) this whole block is dead code.
-          if (STRUCTURE_PRUNE_ENABLED && (await isPruneApproved(ctx.storage, event.sessionID))) {
-            if (state.pruneIntent?.sessionID !== event.sessionID) {
-              state.pruneIntent = { sessionID: event.sessionID }
-              // Rebuild the MCP config so the transform callback can apply it.
-              try {
-                await ctx.mcp.reload()
-              } catch {
-                // A failed reload leaves everything untouched — the safe outcome.
-              }
-            }
-          }
 
           await refreshStructure(ctx, state, event.sessionID)
 
@@ -950,6 +902,10 @@ const parsnip: Plugin.Plugin = {
           for await (const event of usageStream) {
             // `ctx.storage` has no session cascade, so a plugin's per-session keys
             // are orphaned forever when a session is deleted — prune them here.
+            // NOTE: this `pruneSession` is unrelated to the removed structure
+            // prune; it only deletes `session:<id>:*` keys. The name collision
+            // is deliberate — renaming it would touch the session-deleted path
+            // for no benefit.
             if (event.type === "session.deleted") {
               try {
                 const removed = await pruneSession(ctx.storage, event.data.sessionID)

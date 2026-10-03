@@ -1,31 +1,37 @@
 /**
- * Structural cleanup: report unused / unusable MCP servers and unused skills.
+ * Structural reporting: which MCP servers and skills looked unused or unusable
+ * during this session.
  *
- * Two hard rules, both inherited from the plugin's cache-preservation stance:
+ * **This module is report-only. It mutates nothing.**
  *
- *  1. **Nothing here is automatic.** The default is report-only. Config entries
- *     change only through the opt-in prune path, which is double-gated by
- *     `STRUCTURE_PRUNE_ENABLED` (a module constant) *and* a per-session approval
- *     flag — neither of which this plugin ever sets itself.
- *  2. **Never remove.** The prune path only ever sets `disabled: true`, which is
- *     a first-class, reversible field on both MCP config variants. Removing an
- *     entry would lose `command`/`url`/`oauth` and has no cheap restore. Skills
- *     have no `disabled` field at all (see `Skill.Info`), so skills are
- *     report-only and are never mutated.
+ * It used to carry an opt-in prune that set `disabled: true` on MCP servers.
+ * That was removed 2026-10-03 (see
+ * `~/.opencode/plan/parsnip-remove-structure-prune-2026-10-03.md`). Two
+ * reasons, both learned the hard way:
  *
- * "Unused" is scoped per session and is an honest-but-weak signal:
+ *  1. Its only actionable signal was weak. "Unused" is scoped to a single
+ *     session, and — because `codemode` defaults to `true` — it is blind to
+ *     every code-mode server, whose tool calls never fire `execute.before`.
+ *     `used` had been `false` for every server in all 57 measurable sessions.
+ *     The 2026-09-29 smoke test duly flipped all five configured servers,
+ *     three of them healthy.
+ *  2. Its payoff was small. Disabling a server only shrinks the main prompt if
+ *     that server's tools are native, and under a code-mode config the ones
+ *     worth disabling are already absent from the prompt.
+ *
+ * The report survives because it is cheap and, after the `usageKnown` fix,
+ * honest — and because it is what surfaced the `used` bug in the first place.
+ *
+ * Signals, of very unequal quality:
+ *  - MCP server unusable = the runtime reports `failed` or `needs_auth`. The
+ *    strong, reliable one (observed live: `taproot` failed to spawn, `n8n`
+ *    unreachable).
  *  - MCP server unused = no tool call belonging to it was seen in this session.
- *  - MCP server unusable = the runtime reports `failed` or `needs_auth`. This is
- *    the strong, useful signal (observed live: `taproot` failed to spawn,
- *    `n8n` unreachable).
+ *    Weak, and gated by `usageKnown` — see `ServerReport`.
  *  - Skill unused = not `autoinvoke` and never observed through the `skill`
  *    tool. The skill catalog surfaced by the SDK is *incomplete* (verified live
  *    on 2.0.19: only the builtin skills appear, while the session prompt lists
- *    many more), so this is advisory only — never prune a skill.
- *
- * Both weak signals are gated by `usageKnown` (see `ServerReport`), because a
- * `used: false` on a server whose calls could not be observed is not a finding.
- * The strong signal needs no such gate.
+ *    many more), so this is advisory only.
  *
  * Everything except the storage helpers at the bottom is pure and unit-testable
  * under `node --test`; the SDK reference is a type-only import, so this module
@@ -77,8 +83,8 @@ export type ToolUsage = {
  *     recorded `execute` and nothing else.
  *  2. **An absent catalog entry looked identical to an unused server.**
  *
- * So `used` is now only load-bearing when `usageKnown` is true, and neither the
- * report filter nor the prune plan treats an unobserved server as dead weight.
+ * So `used` is only load-bearing when `usageKnown` is true, and the report
+ * filter drops an unobserved server rather than listing it as dead weight.
  */
 export type ServerReport = ServerEntry & {
   used: boolean
@@ -108,48 +114,23 @@ export type StructureReport = {
   computedAt: number
 }
 
-export type PrunePlan = {
-  servers: string[]
-  skills: string[]
-}
-
-export type PruneChange = {
-  kind: "server"
-  name: string
-  before: { disabled: boolean }
-  after: { disabled: boolean }
-}
-
-export type PruneDiff = {
-  at: number
-  changes: PruneChange[]
-  /** Named in the plan but not found in the editor (stale catalog). */
-  skipped: string[]
-}
-
-/**
- * Narrow editor surface the prune path needs; keeps the logic testable.
- * `codemode` is carried so the catalog snapshot can record observability.
- */
-export type ServerEditorLike = {
-  list(): readonly (readonly [string, { disabled?: boolean; codemode?: boolean }])[]
-  update(name: string, update: (config: { disabled?: boolean }) => void): void
+export type ReportOptions = {
+  unusedServersOnly: boolean
+  unusedSkillsOnly: boolean
 }
 
 // --- Defaults ---------------------------------------------------------------
 
-/** Opt-in only. With this `false` (the default) Phase 3 changes nothing. */
-export const STRUCTURE_PRUNE_ENABLED = false
-
 /**
- * Filter the report to *dead weight* only — servers that are unused or
- * unusable. Used-but-healthy servers are dropped from the report, because the
- * report exists to answer "what can I turn off", not "what is configured".
+ * Report only dead weight: servers that are unusable, or unused *and* observed
+ * unused. Used-and-healthy servers are dropped, because the report exists to
+ * answer "what looks like it could be turned off", not "what is configured".
+ *
+ * This was previously `UNUSED_SERVERS_ONLY`, shared with the deleted prune
+ * options. With the prune gone it is purely a display filter, so it is renamed
+ * to say that.
  */
-export const UNUSED_SERVERS_ONLY = true
-
-/** Skills are report-only: `Skill.Info` has no reversible off-switch. */
-export const PRUNE_UNUSED_SKILLS = false
+export const REPORT_DEAD_WEIGHT_ONLY = true
 
 /** Statuses that mean "this server cannot be used at all". */
 export const UNUSABLE_STATUSES: readonly string[] = ["failed", "needs_auth"]
@@ -164,32 +145,6 @@ export const HOST_TOOL_NAMESPACES: readonly string[] = ["browser", "opencode"]
 /** Bounds for the per-session usage sets. */
 export const TOOL_USAGE_LIMIT = 512
 export const SKILL_USAGE_LIMIT = 512
-
-export type PruneOptions = {
-  enabled: boolean
-  /** Include servers that are merely unused (not unusable). */
-  unusedServers: boolean
-  /** Include skills that are merely unused. Off by default — see the header. */
-  unusedSkills: boolean
-}
-
-/**
- * What the prune path actually selects when it is switched on.
- *
- * Read this before flipping `STRUCTURE_PRUNE_ENABLED`: with `unusedServers:
- * true` (the plan's `UNUSED_SERVERS_ONLY`) turning the feature on disables
- * *every* server that was unused in the approving session — including healthy
- * ones. Verified live during the Phase 3 smoke: with the flag on, all five
- * configured servers (three of them `connected`) were flipped to
- * `disabled: true`. "Unused in this session" is a weak signal; `unusable`
- * (`failed`/`needs_auth`) is the safe one. Set `unusedServers: false` for a
- * conservative prune.
- */
-export const PRUNE_OPTIONS: PruneOptions = {
-  enabled: STRUCTURE_PRUNE_ENABLED,
-  unusedServers: UNUSED_SERVERS_ONLY,
-  unusedSkills: PRUNE_UNUSED_SKILLS,
-}
 
 // --- Classification (pure) --------------------------------------------------
 
@@ -248,7 +203,7 @@ export type ReportOptions = {
 }
 
 export const REPORT_OPTIONS: ReportOptions = {
-  unusedServersOnly: UNUSED_SERVERS_ONLY,
+  unusedServersOnly: REPORT_DEAD_WEIGHT_ONLY,
   unusedSkillsOnly: true,
 }
 
@@ -258,8 +213,7 @@ export const REPORT_OPTIONS: ReportOptions = {
  * The `unusedServersOnly` filter keeps a server when it is **unusable**, or when
  * it is unused *and that verdict is supported* (`usageKnown`). An unobservable
  * server is dropped rather than reported, because "we could not see whether it
- * was used" is not the same claim as "you can turn this off" — and conflating
- * them is what produced a five-server prune on healthy servers.
+ * was used" is not the same claim as "you can turn this off".
  */
 export function computeReport(
   servers: readonly ServerEntry[],
@@ -279,60 +233,6 @@ export function computeReport(
       : classifiedSkills,
     computedAt: Date.now(),
   }
-}
-
-/**
- * The list of entries the opt-in prune would disable.
- *
- * `unusable` is the strong signal and is honoured on its own. `unusedServers`
- * only adds a server when the unused verdict is *supported* (`usageKnown`);
- * without that guard a code-mode server — invisible to `execute.before` — reads
- * as unused and would be disabled on no evidence at all.
- */
-export function buildPrunePlan(
-  report: StructureReport,
-  options: PruneOptions = PRUNE_OPTIONS,
-): PrunePlan {
-  const plan: PrunePlan = { servers: [], skills: [] }
-  if (!options.enabled) return plan
-
-  for (const server of report.servers) {
-    if (server.unusable || (options.unusedServers && !server.used && server.usageKnown)) {
-      plan.servers.push(server.name)
-    }
-  }
-  if (options.unusedSkills) {
-    for (const skill of report.skills) {
-      if (!skill.used) plan.skills.push(skill.id)
-    }
-  }
-  return plan
-}
-
-/**
- * Apply a prune plan to an MCP editor. Only ever sets `disabled: true` — never
- * `remove()` — and returns a before/after diff so the change is visible and
- * manually reversible. Skills are ignored by design.
- */
-export function applyPrunePlan(editor: ServerEditorLike, plan: PrunePlan): PruneDiff {
-  const changes: PruneChange[] = []
-  const skipped: string[] = []
-  const entries = new Map(editor.list().map(([name, config]) => [name, config]))
-
-  for (const name of plan.servers) {
-    const config = entries.get(name)
-    if (!config) {
-      skipped.push(name)
-      continue
-    }
-    const before = { disabled: config.disabled === true }
-    editor.update(name, (next) => {
-      next.disabled = true
-    })
-    changes.push({ kind: "server", name, before, after: { disabled: true } })
-  }
-
-  return { at: Date.now(), changes, skipped }
 }
 
 // --- Usage extraction -------------------------------------------------------
@@ -378,8 +278,6 @@ export function skillIdOf(input: unknown): string {
 export const toolUsageKey = (sessionID: string): string => `session:${sessionID}:toolUsage`
 export const skillUsageKey = (sessionID: string): string => `session:${sessionID}:skillUsage`
 export const structureKey = (sessionID: string): string => `session:${sessionID}:structure`
-export const pruneDiffKey = (sessionID: string): string => `session:${sessionID}:prune.diff`
-export const pruneApprovedKey = (sessionID: string): string => `session:${sessionID}:prune.approved`
 
 type Json = Parameters<StorageDomain["set"]>[1]
 
@@ -456,20 +354,4 @@ export async function loadStructureReport(
   sessionID: string,
 ): Promise<StructureReport | undefined> {
   return asStructureReport(await storage.get(structureKey(sessionID)))
-}
-
-/** The owner sets this by hand; the plugin never does. */
-export async function isPruneApproved(
-  storage: StorageDomain,
-  sessionID: string,
-): Promise<boolean> {
-  return (await storage.get(pruneApprovedKey(sessionID))) === true
-}
-
-export async function recordPruneDiff(
-  storage: StorageDomain,
-  sessionID: string,
-  diff: PruneDiff,
-): Promise<void> {
-  await storage.set(pruneDiffKey(sessionID), diff as unknown as Json)
 }

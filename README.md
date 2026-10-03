@@ -306,18 +306,20 @@ damage.
 - The `chars / 4` heuristic in `lib/quality.ts` is an **occupancy estimate only**,
   used for the `Context occupancy` line in the continuity block. It is not the
   plugin's token measurement.
-- The structure report (unused/unusable MCP servers and skills) is report-only.
-  The prune path is off by default, double-gated, and only ever sets
-  `disabled: true` — never removes an entry, since removal would lose
-  `command`/`url`/`oauth`.
+- **Parsnip never edits your configuration.** It used to carry an opt-in prune
+  that set `disabled: true` on MCP servers; that was removed 2026-10-03. Its
+  only actionable signal — "unused in this session" — was weak and, because
+  `codemode` defaults to `true`, blind to every code-mode server. A 2026-09-29
+  smoke test duly disabled all five configured servers, three of them healthy.
+  The report below survives as a diagnostic; nothing acts on it.
 - **A `used: false` on a server is not evidence.** Every entry carries
   `usageKnown`, and it is `false` whenever the server's calls could not have been
   observed at all. `codemode` defaults to `true`, so a code-mode server's tools
   are reachable only through `execute`, and the inner call never fires
   `execute.before`. Measured over 57 sessions, `used` had been `false` for
   *every* server in *every* session — it had never once been true. An
-  unobservable server is now excluded from the dead-weight report and can never
-  be pruned; only `unusable` (`failed` / `needs_auth`) stands on its own. Skills
+  unobservable server is excluded from the dead-weight report. Only `unusable`
+  (`failed` / `needs_auth`) stands on its own, and it has always worked. Skills
   are always `usageKnown: false`, because the SDK's skill catalog is incomplete.
 
 ## Development
@@ -344,7 +346,7 @@ server/
   lib/toolhooks.ts      result handling + dedup + savings/fidelity/recall (pure)
   lib/config.ts         persisted runtime config + resolver
   lib/compaction.ts     continuity block rendering (pure, leaf)
-  lib/structure.ts      structural report + prune plan (pure)
+  lib/structure.ts      structural report: usage + catalog classification (pure)
   lib/storage.ts        per-session continuity + savings + token usage
   lib/quality.ts        token estimate + occupancy (pure, leaf)
   *.test.ts             node:test suites (no framework)

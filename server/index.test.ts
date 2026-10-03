@@ -23,7 +23,6 @@ function makeHarness(options: { events?: AnyRecord[] } = {}) {
   const skillTransforms: Array<(editor: AnyRecord) => void> = []
   const toolTransforms: Array<(editor: AnyRecord) => void> = []
   const commandTransforms: Array<(editor: AnyRecord) => void> = []
-  const mcpReloads: string[] = []
   const store = new Map<string, unknown>()
   const disposed: string[] = []
 
@@ -44,7 +43,9 @@ function makeHarness(options: { events?: AnyRecord[] } = {}) {
         return { dispose: async () => void disposed.push("mcp.transform") }
       },
       list: async () => ({ location: null, data: mcpServers }),
-      reload: async () => void mcpReloads.push("reload"),
+      // No-op: the plugin must never reload the MCP config. Asserted by
+      // "mcp.transform never mutates the MCP config".
+      reload: async () => {},
     },
     skill: {
       transform: async (callback: (editor: AnyRecord) => void) => {
@@ -114,7 +115,6 @@ function makeHarness(options: { events?: AnyRecord[] } = {}) {
     skillTransforms,
     toolTransforms,
     commandTransforms,
-    mcpReloads,
     mcpServers,
     skillCatalog,
     store,
@@ -743,17 +743,18 @@ test("execute.before: records tool + skill usage in storage, not module state", 
   assert.deepEqual(h.store.get("session:ses_test:skillUsage"), ["systematic-debugging"])
 })
 
-test("structure report: keys are per session and default to report-only", async () => {
+test("structure report: keys are per session", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
   await h.hooks["execute.before"](toolEvent({ tool: "shell" }))
   assert.ok(h.store.has("session:ses_test:structure"))
-  assert.ok(!h.store.has("session:ses_test:prune.diff"), "nothing may be pruned by default")
-  assert.deepEqual(h.mcpReloads, [], "no config reload may happen by default")
 })
 
-test("prune path stays inert without the owner's approval flag", async () => {
+test("mcp.transform never mutates the MCP config", async () => {
+  // The prune that used to live here was removed 2026-10-03. This is the
+  // permanent replacement for its "stays inert" tests: observing the catalog
+  // must leave every entry exactly as it was found.
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
@@ -765,7 +766,6 @@ test("prune path stays inert without the owner's approval flag", async () => {
 
   assert.deepEqual([...map.values()], [{ type: "local" }, { type: "remote", url: "x" }])
   assert.deepEqual(removed, [])
-  assert.ok(!h.store.has("session:ses_test:prune.diff"))
 })
 
 // --- Runtime config surfaces (tool + command) -------------------------------

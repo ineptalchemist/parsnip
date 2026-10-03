@@ -180,26 +180,25 @@ aside first.
 - **A TUI status display is unbuilt.** A read-only `status` RPC exists on a local
   `tui-footer-indicator` branch that is unmerged and not pushed, so it is
   unavailable to anyone cloning this repo. The plugin ships server-side only.
+- **The structure prune was removed 2026-10-03.** Parsnip no longer edits
+  configuration at all; `structure.ts` is report-only. Two reasons. Its only
+  actionable signal was weak — "unused" is scoped to one session, and because
+  `codemode` defaults to `true` it is blind to every code-mode server, so `used`
+  was `false` for *every* server in all 57 measurable sessions and had never
+  once been `true`. And the payoff was small: disabling a server only shrinks the
+  main prompt if its tools are native, and under a code-mode config the ones
+  worth disabling are already absent from the prompt. The 2026-09-29 smoke test
+  had flipped all five configured servers, three of them healthy — the concrete
+  demonstration. Plan: `~/.opencode/plan/parsnip-remove-structure-prune-2026-10-03.md`.
+- **`used` is honest but still not an analysis.** Gated by `usageKnown` since
+  2026-10-03, so an unobservable server is dropped from dead weight rather than
+  reported. It still has no counts, no cross-session history, no time dimension.
+  Do not read "fixed" as "safe to act on".
 - **The structure report has no reader.** `asStructureReport` /
   `loadStructureReport` are tested and stable but nothing in production calls
   them — there is no UI surface yet. They exist so a future reader does not have
-  to re-derive the stored shape.
-- **`used` was dead before 2026-10-03, and is now gated.** Over the 57 sessions
-  that recorded both a usage list and a report, `used` was `false` for every
-  server in every session — it had never been `true` once. The cause is
-  structural, not statistical: `codemode` defaults to `true`, so a code-mode
-  server's tools are reachable only through `execute` and the inner call never
-  fires `execute.before`. Every entry now carries `usageKnown`; an unobservable
-  server is dropped from the dead-weight report and can never be pruned. This is
-  what would have prevented the 2026-09-29 five-server flip. The fix is honest
-  reporting only — `used` is still not a usage *analysis*: it has no counts, no
-  cross-session history, and no time dimension.
-- **`PRUNE_OPTIONS.unusedServers` is a footgun.** With it on, enabling the flag
-  disables *every* server unused in the approving session. This was observed
-  live: all five configured servers flipped, three of them healthy. The strong
-  signal is `unusable` (`failed` / `needs_auth`), not "unused". The
-  `usageKnown` gate now removes the worst of this, but the option is still the
-  wrong default for a prune.
+  to re-derive the stored shape, and because the report is what surfaced the
+  `used` bug.
 - **`validThreshold` (floor 200) and `MIN_CHARS_LIMIT` (800) are separate
   bounds.** Duplicated deliberately while `selectors.ts` stays a leaf module, but
   they can drift.

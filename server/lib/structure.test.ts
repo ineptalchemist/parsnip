@@ -1,21 +1,17 @@
 /**
- * Unit tests for the Phase 3 structural-cleanup logic (pure functions + the
+ * Unit tests for the Phase 3 structural-reporting logic (pure functions + the
  * storage helpers). No OpenCode runtime is involved; the storage domain is a
  * tiny in-memory fake.
  */
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
-  PRUNE_OPTIONS,
   SKILL_CATALOG_COMPLETE,
   SKILL_USAGE_LIMIT,
-  STRUCTURE_PRUNE_ENABLED,
-  applyPrunePlan,
   appendUsage,
   asStringArray,
   asStructureReport,
   asToolUsage,
-  buildPrunePlan,
   classifyServers,
   classifySkills,
   computeReport,
@@ -27,7 +23,6 @@ import {
   toolUsageKey,
   type ServerEntry,
   type SkillEntry,
-  type StructureReport,
 } from "./structure.ts"
 
 function makeStorage() {
@@ -222,130 +217,6 @@ test("computeReport: tolerates empty catalogs and empty usage", () => {
   assert.ok(report.computedAt > 0)
 })
 
-// --- buildPrunePlan ---------------------------------------------------------
-
-const fullReport = computeReport(
-  servers,
-  skills,
-  { tools: ["firecrawl_scrape"], skills: ["report"] },
-  { unusedServersOnly: false, unusedSkillsOnly: false },
-)
-
-test("buildPrunePlan: nothing to prune when the feature is disabled", () => {
-  assert.deepEqual(buildPrunePlan(fullReport, PRUNE_OPTIONS), { servers: [], skills: [] })
-  assert.equal(STRUCTURE_PRUNE_ENABLED, false)
-})
-
-test("buildPrunePlan: unusable servers only, used/healthy servers excluded", () => {
-  const plan = buildPrunePlan(fullReport, {
-    enabled: true,
-    unusedServers: false,
-    unusedSkills: false,
-  })
-  assert.deepEqual(plan.servers, ["taproot", "n8n"])
-  assert.deepEqual(plan.skills, [])
-})
-
-test("buildPrunePlan: unused servers are added only with that option", () => {
-  const plan = buildPrunePlan(fullReport, {
-    enabled: true,
-    unusedServers: true,
-    unusedSkills: false,
-  })
-  // basic-memory is unused AND observable (`codemode: false`), so it qualifies.
-  // taproot/n8n are unusable. firecrawl is used in this report; parallel is
-  // `used: false` but unobservable, so it is never pruned on no evidence.
-  assert.deepEqual(plan.servers.sort(), ["basic-memory", "n8n", "taproot"])
-})
-
-test("buildPrunePlan: an unobservable server is never pruned, even with unusedServers on", () => {
-  const report = computeReport(servers, skills, { tools: [], skills: [] }, {
-    unusedServersOnly: false,
-    unusedSkillsOnly: false,
-  })
-  const plan = buildPrunePlan(report, {
-    enabled: true,
-    unusedServers: true,
-    unusedSkills: false,
-  })
-  const parallel = report.servers.find((server) => server.name === "parallel")
-  assert.equal(parallel?.used, false)
-  assert.equal(parallel?.usageKnown, false)
-  assert.equal(plan.servers.includes("parallel"), false, "must not disable a server we cannot see")
-  // The unusable pair still comes through: the strong signal needs no gate.
-  assert.deepEqual(plan.servers.sort(), ["basic-memory", "n8n", "taproot"])
-})
-
-test("buildPrunePlan: unused skills need an explicit opt-in", () => {
-  const withSkills = buildPrunePlan(fullReport, {
-    enabled: true,
-    unusedServers: true,
-    unusedSkills: true,
-  })
-  assert.deepEqual(withSkills.skills, ["opencode"])
-})
-
-test("buildPrunePlan: empty report plans nothing", () => {
-  const empty: StructureReport = { servers: [], skills: [], computedAt: 1 }
-  assert.deepEqual(
-    buildPrunePlan(empty, { enabled: true, unusedServers: true, unusedSkills: true }),
-    { servers: [], skills: [] },
-  )
-})
-
-// --- applyPrunePlan ---------------------------------------------------------
-
-function makeEditor(entries: Array<[string, { disabled?: boolean }]>) {
-  const calls: string[] = []
-  const map = new Map(entries.map(([name, config]) => [name, { ...config }]))
-  return {
-    calls,
-    map,
-    list: () => [...map.entries()],
-    update: (name: string, update: (config: { disabled?: boolean }) => void) => {
-      calls.push(name)
-      const config = map.get(name)
-      assert.ok(config, `update called for an unknown server: ${name}`)
-      update(config)
-    },
-  }
-}
-
-test("applyPrunePlan: sets disabled: true and records a before/after diff", () => {
-  const editor = makeEditor([
-    ["taproot", { disabled: false }],
-    ["n8n", {}],
-  ])
-
-  const diff = applyPrunePlan(editor, { servers: ["taproot", "n8n"], skills: [] })
-
-  assert.deepEqual(editor.calls, ["taproot", "n8n"])
-  assert.equal(editor.map.get("taproot")?.disabled, true)
-  assert.equal(editor.map.get("n8n")?.disabled, true)
-  assert.deepEqual(diff.changes, [
-    { kind: "server", name: "taproot", before: { disabled: false }, after: { disabled: true } },
-    { kind: "server", name: "n8n", before: { disabled: false }, after: { disabled: true } },
-  ])
-  assert.deepEqual(diff.skipped, [])
-  assert.ok(diff.at > 0)
-})
-
-test("applyPrunePlan: skips names the editor does not know (never throws)", () => {
-  const editor = makeEditor([["taproot", {}]])
-  const diff = applyPrunePlan(editor, { servers: ["taproot", "ghost"], skills: [] })
-
-  assert.deepEqual(editor.calls, ["taproot"])
-  assert.deepEqual(diff.skipped, ["ghost"])
-})
-
-test("applyPrunePlan: an empty plan touches nothing", () => {
-  const editor = makeEditor([["taproot", {}]])
-  const diff = applyPrunePlan(editor, { servers: [], skills: ["opencode"] })
-  assert.deepEqual(editor.calls, [])
-  assert.deepEqual(diff.changes, [])
-  assert.deepEqual(editor.map.get("taproot"), {})
-})
-
 // --- usage helpers ----------------------------------------------------------
 
 test("appendUsage: dedups, ignores empties, and caps the list", () => {
@@ -408,15 +279,19 @@ test("loadUsage: tolerates a missing or malformed record", async () => {
 })
 
 test("asStructureReport: round-trips a persisted report", () => {
+  const report = computeReport(servers, skills, { tools: ["firecrawl_scrape"], skills: ["report"] }, {
+    unusedServersOnly: false,
+    unusedSkillsOnly: false,
+  })
   assert.equal(asStructureReport(undefined), undefined)
   assert.equal(asStructureReport({ servers: [] }), undefined)
-  assert.deepEqual(asStructureReport(JSON.parse(JSON.stringify(fullReport))), fullReport)
+  assert.deepEqual(asStructureReport(JSON.parse(JSON.stringify(report))), report)
 })
 
 test("asStructureReport: a pre-2026-10-03 report reads as unobservable, not as evidence", () => {
   // Reports written before `usageKnown` existed carry exactly the unsupported
-  // `used: false` this change exists to distinguish. A missing flag must never
-  // be read back as support for the verdict.
+  // `used: false` this field now distinguishes. A missing flag must never be
+  // read back as support for the verdict.
   const legacy = {
     servers: [{ name: "parallel", type: "remote", disabled: false, status: "connected", used: false }],
     skills: [{ id: "opencode", name: "OpenCode", autoinvoke: false, used: false }],
@@ -425,13 +300,6 @@ test("asStructureReport: a pre-2026-10-03 report reads as unobservable, not as e
   const read = asStructureReport(legacy)
   assert.equal(read?.servers[0].usageKnown, false)
   assert.equal(read?.skills[0].usageKnown, false)
-
-  const plan = buildPrunePlan(read as StructureReport, {
-    enabled: true,
-    unusedServers: true,
-    unusedSkills: false,
-  })
-  assert.deepEqual(plan.servers, [], "legacy data must not authorise a prune")
 })
 
 test("structureKey: namespaced per session", () => {
