@@ -31,8 +31,8 @@ function makeStorage() {
   return { store, storage }
 }
 
-test("DEFAULT_CONFIG: compression off, dedup on, selector head-tail", () => {
-  assert.deepEqual(DEFAULT_CONFIG, { compression: false, dedup: true, selector: "head-tail" })
+test("DEFAULT_CONFIG: compression on, dedup on, selector extractive", () => {
+  assert.deepEqual(DEFAULT_CONFIG, { compression: true, dedup: true, selector: "extractive" })
 })
 
 test("sessionConfigKey: namespaces by session", () => {
@@ -42,29 +42,29 @@ test("sessionConfigKey: namespaces by session", () => {
 
 test("resolveConfig: session override beats global beats default", () => {
   assert.deepEqual(resolveConfig(), {
-    compression: false,
+    compression: true,
     dedup: true,
-    selector: "head-tail",
+    selector: "extractive",
     minChars: undefined,
   })
   assert.deepEqual(resolveConfig({ compression: true }), {
     compression: true,
     dedup: true,
-    selector: "head-tail",
+    selector: "extractive",
     minChars: undefined,
   })
   assert.deepEqual(
-    resolveConfig({ compression: true, dedup: false }, { compression: false }),
-    { compression: false, dedup: false, selector: "head-tail", minChars: undefined },
+    resolveConfig({ compression: false, dedup: false }, { compression: true }),
+    { compression: true, dedup: false, selector: "extractive", minChars: undefined },
   )
 })
 
 test("resolveConfig: fields resolve independently", () => {
   // Session only sets dedup; compression falls through to the global override.
-  assert.deepEqual(resolveConfig({ compression: true }, { dedup: false }), {
-    compression: true,
+  assert.deepEqual(resolveConfig({ compression: false }, { dedup: false }), {
+    compression: false,
     dedup: false,
-    selector: "head-tail",
+    selector: "extractive",
     minChars: undefined,
   })
 })
@@ -115,19 +115,19 @@ test("storage: global + session overrides round-trip independently", async () =>
 
 test("effectiveConfig: merges both levels", async () => {
   const { storage } = makeStorage()
-  await saveGlobalConfig(storage, { compression: true })
-  await saveSessionConfig(storage, "ses_1", { compression: false })
+  await saveGlobalConfig(storage, { compression: false })
+  await saveSessionConfig(storage, "ses_1", { compression: true })
 
   assert.deepEqual(await effectiveConfig(storage, "ses_1"), {
-    compression: false,
+    compression: true,
     dedup: true,
-    selector: "head-tail",
+    selector: "extractive",
     minChars: undefined,
   })
   assert.deepEqual(await effectiveConfig(storage, "ses_2"), {
-    compression: true,
+    compression: false,
     dedup: true,
-    selector: "head-tail",
+    selector: "extractive",
     minChars: undefined,
   })
 })

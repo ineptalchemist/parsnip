@@ -382,22 +382,24 @@ function configTool(ctx: Plugin.Context) {
     name: CONFIG_TOOL_NAME,
     description:
       "View or change parsnip's lossy tool-output transforms. compression = " +
-      "head+tail truncation of oversized shell output; selector = which " +
+      "truncate oversized tool output using the chosen selector; selector = which " +
       "compression backend to use; dedup = collapse a repeated identical large " +
       "result to a marker. minChars = compression threshold in characters " +
       "(default 4000; range 800-200000), which also sets how much is kept: " +
-      "40% from the front, 30% from the back. " +
+      "40% from the front, 30% from the back. Compression is lossy to the prompt " +
+      "but lossless to the system: every dropped result is recoverable via " +
+      "parsnip_recall, so a surprising omission is never a dead end. " +
       "Set session:true to scope a change to the current " +
       "session only (e.g. while doing critical work); otherwise it is global. " +
       "Values persist across restarts.",
     input: {
       type: "object",
       properties: {
-        compression: { type: "boolean", description: "Enable/disable head+tail compression." },
+        compression: { type: "boolean", description: "Enable/disable compression (default on)." },
         selector: {
           type: "string",
           enum: [...SELECTOR_NAMES],
-          description: "Compression method used when compression is on (default head-tail).",
+          description: "Compression method used when compression is on (default extractive).",
         },
         dedup: { type: "boolean", description: "Enable/disable duplicate suppression." },
         minChars: {

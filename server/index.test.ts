@@ -321,9 +321,10 @@ function toolEvent(overrides: AnyRecord = {}) {
   }
 }
 
-test("execute.after: passes a large shell result through when compression is off (default)", async () => {
+test("execute.after: passes a large shell result through when compression is off", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
   const event = toolEvent()
   const inputSnapshot = JSON.stringify(event.input)
@@ -342,7 +343,9 @@ test("execute.after: passes a large shell result through when compression is off
 test("execute.after: compresses a large shell result when enabled via config", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("parsnip:config", { compression: true })
+  // Pinned to head-tail: this asserts the head/tail layout byte-for-byte, and
+  // head-tail is no longer the default selector.
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
 
   const event = toolEvent()
   const outputRef = event.result.output
@@ -386,8 +389,9 @@ test("execute.after: ignores errors and non-target tools", async () => {
 test("execute.after: suppresses a repeated identical large result", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
-  // Compression is off by default, so the first-seen large result passes
+  // Compression is off here, so the first-seen large result passes
   // through unchanged; a repeat is still suppressed by dedup.
   const first = toolEvent()
   await h.hooks["execute.after"](first)
@@ -413,9 +417,10 @@ test("execute.after: keeps its dedup memory in storage, not module state", async
   assert.ok(history[0].startsWith("shell:"))
 })
 
-test("execute.after: dedup savings are recorded; compression is off by default", async () => {
+test("execute.after: dedup savings are recorded with compression off", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
   await h.hooks["execute.after"](toolEvent())
   await h.hooks["execute.after"](toolEvent()) // duplicate
@@ -431,6 +436,7 @@ test("execute.after: dedup savings are recorded; compression is off by default",
 test("execute.after: a re-run with changed output is NOT suppressed (content-hash dedup)", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
   await h.hooks["execute.after"](toolEvent()) // first: baseline content
 
@@ -450,6 +456,7 @@ test("execute.after: a re-run with changed output is NOT suppressed (content-has
 test("execute.after: the dedup ring is capped at DEDUP_MEMORY", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
   // 17 distinct large results evict the first from the 16-entry ring.
   for (let i = 0; i < 17; i += 1) {
@@ -467,6 +474,7 @@ test("execute.after: the dedup ring is capped at DEDUP_MEMORY", async () => {
 test("execute.after: a repeated identical large search result is suppressed", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
   const search = () =>
     toolEvent({
@@ -487,7 +495,7 @@ test("execute.after: a repeated identical large search result is suppressed", as
 test("execute.after: compression savings are recorded when enabled", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("parsnip:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
 
   await h.hooks["execute.after"](toolEvent())
 
@@ -505,7 +513,7 @@ test("execute.after: compression savings are recorded when enabled", async () =>
 test("execute.after: logs a parseable savings line per event", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("parsnip:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
 
   const lines: string[] = []
   const original = console.error
@@ -877,7 +885,7 @@ test("config command: parses `selector head-tail`; unknown selector writes nothi
 test("execute.after: records a per-method fidelity event with the dropped-region hash", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("parsnip:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
 
   await h.hooks["execute.after"](toolEvent())
 
@@ -901,6 +909,7 @@ test("execute.after: records a per-method fidelity event with the dropped-region
 test("execute.after: no fidelity event when compression is off", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
   await h.hooks["execute.after"](toolEvent())
   assert.equal(h.store.has("session:ses_test:compressions"), false)
@@ -950,6 +959,7 @@ test("parsnip_recall: returns the stored text, or a not-found note", async () =>
 test("execute.after: no recall entry when compression is off", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
 
   await h.hooks["execute.after"](toolEvent())
   assert.equal(h.store.has("session:ses_test:recall"), false)

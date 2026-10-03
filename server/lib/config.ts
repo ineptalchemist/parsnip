@@ -60,9 +60,19 @@ export function asMinChars(value: unknown): number | undefined {
 
 /** Used when neither the session nor the global override sets a field. */
 export const DEFAULT_CONFIG: CtxGuardConfig = {
-  compression: false, // head+tail compression is off by default (2026-09-30)
+  // Compression was opt-in from 2026-09-30 until 2026-10-03, pending a quality
+  // harness. The harness landed and the verdict is two-sided: `extractive` wins
+  // its own salience classes outright (100% shape-novel, 4/4 middle prose facts
+  // where every other method got 2/4), while the `value` class — facts with no
+  // distinguishing feature — is ~0% for every selector. That residual gap is what
+  // the recall cache is for, and it is why enabling compression by default does
+  // not make it unsafe: nothing dropped is unrecoverable.
+  compression: true,
   dedup: true,
-  selector: "head-tail",
+  // `extractive` over `head-tail`: it retains strictly more of what the eval
+  // measures as worth keeping, at a slightly worse ratio. It does fragment
+  // identifiers the most (13 vs 9 over the compare corpus), which is the cost.
+  selector: "extractive",
 }
 
 export const GLOBAL_CONFIG_KEY = "parsnip:config"

@@ -114,7 +114,7 @@ Requires Node 24 (the `.ts` sources run directly via built-in type stripping —
 there is no build step) and OpenCode 2.0.20+.
 
 ```bash
-git clone https://github.com/ineptalchemist/ctx-guard
+git clone https://github.com/ineptalchemist/parsnip
 npm install          # devDependency only; the plugin has zero runtime deps
 ```
 
@@ -132,7 +132,14 @@ a file in the directory hot-reloads the plugin, so there is no service restart.
 Both toggles persist in `ctx.storage` and survive reloads and restarts. Precedence
 is **session override → global override → default**.
 
-**Defaults: compression OFF, dedup ON, selector `head-tail`, threshold 4000.**
+**Defaults: compression ON, dedup ON, selector `extractive`, threshold 4000.**
+
+Compression was opt-in from 2026-09-30 until 2026-10-03, pending the quality
+harness. The harness landed and the verdict is two-sided: `extractive` wins its
+own salience classes outright, while facts with *no* distinguishing feature are
+recovered by nothing. That residual gap is why enabling compression by default
+is defensible rather than careless — nothing dropped is unrecoverable, so the
+worst case is a `parsnip_recall` call.
 
 As the agent, call the `parsnip_config` tool:
 
