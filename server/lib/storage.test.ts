@@ -51,7 +51,14 @@ test("savingsKey: namespaces by session", () => {
 })
 
 test("asSavings: rejects non-objects and fills safe defaults", () => {
-  const empty = { compressions: 0, charsOmitted: 0, dedups: 0, charsDeduped: 0, bySelector: {} }
+  const empty = {
+    compressions: 0,
+    charsOmitted: 0,
+    dedups: 0,
+    charsDeduped: 0,
+    bySelector: {},
+    recall: { retrieved: 0, chars: 0, misses: 0, lists: 0 },
+  }
   assert.deepEqual(asSavings(undefined), empty)
   assert.deepEqual(asSavings(null), empty)
   assert.deepEqual(asSavings([1, 2]), empty)
@@ -84,6 +91,7 @@ test("loadSavings / saveSavings: round-trip through storage", async () => {
     dedups: 0,
     charsDeduped: 0,
     bySelector: {},
+    recall: { retrieved: 0, chars: 0, misses: 0, lists: 0 },
   })
 
   await saveSavings(storage, "ses_1", {
@@ -92,6 +100,7 @@ test("loadSavings / saveSavings: round-trip through storage", async () => {
     dedups: 1,
     charsDeduped: 5900,
     bySelector: { "head-tail": { compressions: 2, charsOmitted: 6400, charsKept: 5600 } },
+    recall: { retrieved: 3, chars: 18000, misses: 1, lists: 2 },
   })
   assert.deepEqual(await loadSavings(storage, "ses_1"), {
     compressions: 2,
@@ -99,6 +108,7 @@ test("loadSavings / saveSavings: round-trip through storage", async () => {
     dedups: 1,
     charsDeduped: 5900,
     bySelector: { "head-tail": { compressions: 2, charsOmitted: 6400, charsKept: 5600 } },
+    recall: { retrieved: 3, chars: 18000, misses: 1, lists: 2 },
   })
 
   // A different session has its own tally.
@@ -108,6 +118,7 @@ test("loadSavings / saveSavings: round-trip through storage", async () => {
     dedups: 0,
     charsDeduped: 0,
     bySelector: {},
+    recall: { retrieved: 0, chars: 0, misses: 0, lists: 0 },
   })
 })
 

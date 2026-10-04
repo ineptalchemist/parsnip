@@ -68,6 +68,33 @@ export const SEARCH_TOOLS: readonly string[] = [
 /** Every tool whose result the plugin may rewrite in `execute.after`. */
 export const TARGET_TOOLS: readonly string[] = [...SHELL_TOOLS, ...SEARCH_TOOLS]
 
+/**
+ * Targets for *compression* when search compression is off (the default).
+ *
+ * Why the split: dedup on a search tool is safe — it is content-addressed, so a
+ * changed re-fetch never collapses, and the original is already in context from
+ * the first occurrence. Compression on search output is not, for a reason found
+ * by measurement rather than intuition. Across 28 recorded search/fetch
+ * documents (70 URLs, 71 result records, 366k chars of body text):
+ *
+ *   selector            ratio   URLs kept   Titles kept
+ *   head-tail           0.255   34% (24/70)   45%
+ *   token-budget        0.254   34% (24/70)   45%
+ *   log-compact         0.255   34% (24/70)   45%
+ *   signal-preserving   0.305   90% (63/70)   49%
+ *   extractive          0.201   100% (70/70)  45%
+ *
+ * `extractive` keeps every URL, so sources survive — but search output is a
+ * repeated record format (`Title:` / `URL:` / `Published:` / `Author:` /
+ * `Highlights:`), and only 6 of 71 records kept both their title and the start
+ * of their body. `extractive` also *reorders*, so an excerpt can end up far from
+ * the URL it belongs to. The model gets unlabelled excerpts.
+ *
+ * Shell output has no such record structure, so this costs nothing there. Hence
+ * shell-only compression by default, with search re-enablable at runtime.
+ */
+export const SHELL_ONLY_TARGETS: readonly string[] = [...SHELL_TOOLS]
+
 export const DEDUP_MARKER =
   "[parsnip: duplicate output suppressed — same command ran recently]"
 
@@ -103,6 +130,41 @@ export type SelectorTally = {
   charsKept: number
 }
 
+/**
+ * Retrieval tally — the other half of the ledger.
+ *
+ * Until 2026-10-03 this did not exist, and the omission was a real gap rather
+ * than a cosmetic one. Compression is justified entirely by the claim that
+ * nothing dropped is unrecoverable, yet the plugin measured the *dropping* to
+ * the character while not measuring the *recovering* at all. The known-answer
+ * eval independently found that facts with no distinguishing feature are
+ * recovered by 0% of every selector, which makes recall the only mitigation for
+ * exactly the case where it matters most — and it was unobservable.
+ *
+ * So: `retrieved` is a successful by-id retrieval, `chars` what it handed back,
+ * `misses` an id that was not there (evicted, or wrong), and `lists` an index
+ * listing. `misses` matters because the store is bounded at 1 MB / 128 entries,
+ * so a rising miss rate is the early warning that drops are becoming
+ * unrecoverable — the one failure mode the recall guarantee does not cover.
+ */
+export type RecallTally = {
+  /** Successful retrievals by id. */
+  retrieved: number
+  /** Total chars handed back to the agent. */
+  chars: number
+  /** Ids asked for that were not in the store. */
+  misses: number
+  /** Index listings (the post-compaction discovery path). */
+  lists: number
+}
+
+export const emptyRecallTally = (): RecallTally => ({
+  retrieved: 0,
+  chars: 0,
+  misses: 0,
+  lists: 0,
+})
+
 /** Per-session tally of what compression + dedup removed (in chars). */
 export type SavingsLedger = {
   /** Number of results compressed (head + tail + omission marker). */
@@ -115,6 +177,8 @@ export type SavingsLedger = {
   charsDeduped: number
   /** The same compression events, broken down by selector id (fidelity signal). */
   bySelector: Record<string, SelectorTally>
+  /** What was later recovered. See `RecallTally`. */
+  recall: RecallTally
 }
 
 export const emptySavings = (): SavingsLedger => ({
@@ -123,6 +187,7 @@ export const emptySavings = (): SavingsLedger => ({
   dedups: 0,
   charsDeduped: 0,
   bySelector: {},
+  recall: emptyRecallTally(),
 })
 
 /**
@@ -174,6 +239,38 @@ export function asBySelector(value: unknown): Record<string, SelectorTally> {
     }
   }
   return out
+}
+
+/** Narrow stored JSON to a retrieval tally, defaulting every field to 0. */
+export function asRecallTally(value: unknown): RecallTally {
+  const base = emptyRecallTally()
+  if (!value || typeof value !== "object" || Array.isArray(value)) return base
+  const v = value as Record<string, unknown>
+  return {
+    retrieved: finiteOrZero(v.retrieved),
+    chars: finiteOrZero(v.chars),
+    misses: finiteOrZero(v.misses),
+    lists: finiteOrZero(v.lists),
+  }
+}
+
+/**
+ * Fold a retrieval event into the ledger. Exactly one of the three shapes
+ * applies per call, which is why this takes a small discriminated input rather
+ * than loose booleans — "retrieved AND missed" is not a state that exists.
+ */
+export function addRecall(
+  ledger: SavingsLedger,
+  event: { retrieved?: number; missed?: boolean; listed?: boolean },
+): SavingsLedger {
+  const recall = { ...ledger.recall }
+  if (typeof event.retrieved === "number") {
+    recall.retrieved += 1
+    recall.chars += Math.max(0, event.retrieved)
+  }
+  if (event.missed) recall.misses += 1
+  if (event.listed) recall.lists += 1
+  return { ...ledger, recall }
 }
 
 /** Fold a dedup event: the replaced text minus the marker length is the saving. */

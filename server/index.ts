@@ -72,12 +72,15 @@ import {
   DEDUP_MIN_CHARS,
   addCompression,
   addDedup,
+  addRecall,
   appendResultText,
   commandOf,
   compressResult,
   compressionEvent,
   dedupSignature,
   formatRecallIndex,
+  SHELL_ONLY_TARGETS,
+  TARGET_TOOLS,
   isTargetTool,
   loadRecall,
   loadRecentCompressions,
@@ -397,6 +400,14 @@ function configTool(ctx: Plugin.Context) {
           description: "Compression method used when compression is on (default extractive).",
         },
         dedup: { type: "boolean", description: "Enable/disable duplicate suppression." },
+        searchCompression: {
+          type: "boolean",
+          description:
+            "Also compress web-search and fetch results (default off). Search output is a " +
+            "repeated record format (Title/URL/Highlights) and every selector breaks the " +
+            "records apart, so excerpts end up separated from their sources. Dedup still " +
+            "applies to search tools either way.",
+        },
         minChars: {
           type: "integer",
           minimum: MIN_CHARS_LIMIT,
@@ -419,6 +430,7 @@ function configTool(ctx: Plugin.Context) {
       if (typeof input.compression === "boolean") patch.compression = input.compression
       if (isSelectorName(input.selector)) patch.selector = input.selector
       if (typeof input.dedup === "boolean") patch.dedup = input.dedup
+      if (typeof input.searchCompression === "boolean") patch.searchCompression = input.searchCompression
       const minChars = asMinChars(input.minChars)
       if (minChars !== undefined) patch.minChars = minChars
 
@@ -430,6 +442,7 @@ function configTool(ctx: Plugin.Context) {
         patch.compression !== undefined ||
         patch.selector !== undefined ||
         patch.dedup !== undefined ||
+        patch.searchCompression !== undefined ||
         patch.minChars !== undefined
       if (changed) {
         await applyConfigPatch(ctx.storage, toolContext.sessionID, patch, { scope, reset })
@@ -461,6 +474,28 @@ function configTool(ctx: Plugin.Context) {
 }
 
 const RECALL_TOOL_NAME = "parsnip_recall"
+
+/**
+ * Fold a retrieval into the session's savings ledger.
+ *
+ * This exists because compression is justified entirely by the claim that
+ * nothing dropped is unrecoverable — and until this was added, the plugin
+ * measured the dropping to the character while not measuring the recovering at
+ * all. `misses` is the field to watch: the recall store is bounded at 1 MB / 128
+ * entries, so a rising miss rate is the early warning that drops are becoming
+ * genuinely unrecoverable, which is the one thing the guarantee does not cover.
+ */
+async function countRecall(
+  ctx: Plugin.Context,
+  sessionID: string,
+  event: { retrieved?: number; missed?: boolean; listed?: boolean },
+): Promise<void> {
+  await saveSavings(
+    ctx.storage,
+    sessionID,
+    addRecall(await loadSavings(ctx.storage, sessionID), event),
+  )
+}
 
 /**
  * Agent-facing recall, added to the tool catalog via `ctx.tool.transform`.
@@ -504,12 +539,24 @@ function recallTool(ctx: Plugin.Context) {
       // No id (or a blank one) lists the index rather than erroring. The previous
       // not-found message already spoke of "(no id given)", so this was always
       // the intended fallback — it just had nothing useful to say.
-      if (id === "") return { content: [{ type: "text", text: formatRecallIndex(state) }] }
+      if (id === "") {
+        await countRecall(ctx, toolContext.sessionID, { listed: true })
+        return { content: [{ type: "text", text: formatRecallIndex(state) }] }
+      }
 
       const entry = state.entries.find((e) => e.id === id)
       const text = entry
         ? `parsnip recall ${id} — ${entry.inputChars} chars, tool ${entry.tool}:\n\n${entry.text}`
         : `parsnip: no cached text for ${id} — it may have been evicted, or the id is wrong.`
+
+      // Best-effort telemetry: the answer is already in hand, so a storage
+      // failure here must never cost the agent its retrieval.
+      await countRecall(
+        ctx,
+        toolContext.sessionID,
+        entry ? { retrieved: entry.text.length } : { missed: true },
+      ).catch(() => {})
+
       return { content: [{ type: "text", text }] }
     },
   }
@@ -525,7 +572,8 @@ function configCommand(ctx: Plugin.Context) {
     name: "parsnip",
     description:
       "View or change parsnip compression/dedup/selector: `/parsnip compression off`, " +
-      "`/parsnip dedup on`, `/parsnip selector head-tail`, " +
+      "`/parsnip dedup on`, `/parsnip search on` (also compress web results; off by default), " +
+      "`/parsnip selector head-tail`, " +
       "`/parsnip threshold 1500` (or `default`), " +
       "`/parsnip reset [session]`. Add `session` to scope to this session only. " +
       "`/parsnip recall <id>` looks up the full text a compression dropped (the " +
@@ -584,6 +632,7 @@ function configCommand(ctx: Plugin.Context) {
       const patch: ConfigOverride = {}
       if (field === "compression") patch.compression = enabled
       else if (field === "dedup") patch.dedup = enabled
+      else if (field === "search") patch.searchCompression = enabled
       else return
       await applyConfigPatch(ctx.storage, invocation.sessionID, patch, { scope })
       await recordConfigDecision(ctx, invocation.sessionID, patch, scope)
@@ -838,7 +887,14 @@ const parsnip: Plugin.Plugin = {
 
           // Then compress with the configured selector. Only the result that is
           // about to be committed is rewritten — never the transcript.
-          if (config.compression) {
+          //
+          // Search / retrieval results are excluded unless `searchCompression` is
+          // on: measured over 28 recorded search documents, every selector breaks
+          // the `Title:`/`URL:`/`Highlights:` records apart, keeping a title and
+          // its excerpt together in only 6 of 71 cases. Dedup above is
+          // unaffected — collapsing a byte-identical repeat is a different claim.
+          const compressionTargets = config.searchCompression ? TARGET_TOOLS : SHELL_ONLY_TARGETS
+          if (config.compression && isTargetTool(event.tool, compressionTargets)) {
             const selector = config.selector
             const threshold = config.minChars
             const compressed = compressResult(event.result, (part) =>

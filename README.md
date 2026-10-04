@@ -1,8 +1,7 @@
 # Parsnip (parity + snip)
 
 A cache-preserving token-snipper for [OpenCode](https://opencode.ai) V2. Parsnip compresses tokens
-from specific tool calls (`bash`/`shell`, plus search and retrieval tools such as `websearch`, `web_fetch`,
-`firecrawl_scrape`) with the goal of preventing repetitive or non-relevant 
+from shell tool calls (`bash`/`shell`) with the goal of preventing repetitive or non-relevant
 tool outputs from being pushed through your agent's context window on every single prompt. This is ideal, as it 
 saves you money. However, this is also not ideal, as missing context can lead you and your agent down
 frustrating rabbit holes. 
@@ -164,7 +163,25 @@ a file in the directory hot-reloads the plugin, so there is no service restart.
 Both toggles persist in `ctx.storage` and survive reloads and restarts. Precedence
 is **session override → global override → default**.
 
-**Defaults: compression ON, dedup ON, selector `extractive`, threshold 4000.**
+**Defaults: compression ON (shell only), dedup ON, selector `extractive`, threshold 4000.**
+
+**Search results are not compressed.** Every selector breaks the
+`Title:` / `URL:` / `Highlights:` record format apart. Measured over 28 recorded
+search documents (70 URLs, 71 result records, 366k chars of body text):
+
+| selector | ratio | URLs kept | Titles kept |
+|---|---|---|---|
+| head-tail / token-budget / log-compact | ~0.255 | **34%** (24/70) | 45% |
+| signal-preserving | 0.305 | 90% (63/70) | 49% |
+| `extractive` | 0.201 | 100% (70/70) | 45% |
+
+`extractive` keeps every URL, so sources survive — but only **6 of 71 records
+kept both their title and the start of their body**, and it reorders lines, so an
+excerpt can end up far from the URL it came from. The model gets unlabelled
+excerpts. Shell output has no record structure, so nothing is lost by leaving it
+alone. Opt back in with `searchCompression: true`; **dedup still applies to
+search tools either way**, since collapsing a byte-identical repeat is a
+different claim from rewriting a document.
 
 Compression was opt-in from 2026-09-30 until 2026-10-03, pending the quality
 harness. The harness landed and the verdict is two-sided: `extractive` wins its
@@ -179,6 +196,7 @@ As the agent, call the `parsnip_config` tool:
 parsnip_config { compression: true }              # turn compression on
 parsnip_config { selector: "log-compact" }        # swap the method
 parsnip_config { minChars: 1500 }                 # lower the threshold
+parsnip_config { searchCompression: true }        # also compress web results
 parsnip_config { compression: false, session: true }  # this session only
 parsnip_config                                     # view; changes nothing
 ```
@@ -188,6 +206,7 @@ As a human, run the slash command:
 ```
 /parsnip compression off
 /parsnip selector log-compact
+/parsnip search on            # also compress web-search / fetch results
 /parsnip threshold 1500        # or: threshold default
 /parsnip dedup on session
 /parsnip reset
@@ -224,15 +243,16 @@ Every other hook writes only to `ctx.storage`.
 
 ## Compression
 
-Applies to shell (`bash`/`shell`) and search/retrieval tools (`websearch`,
-`web_fetch`, `firecrawl_*`) over the threshold. All selectors are pure,
-synchronous, and **faithful**: the output is a verbatim subset of the input — a
-selector never invents content, only drops and adds delimited `[parsnip: …]`
-markers carrying counts.
+Applies to **shell tools only** (`bash` / `shell`) over the threshold. Search and
+retrieval tools (`websearch`, `web_fetch`, `firecrawl_*`) are excluded by
+default — see "Turning it on" for the measurement and the opt-in. All selectors
+are pure, synchronous, and **faithful**: the output is a verbatim subset of the
+input — a selector never invents content, only drops and adds delimited
+`[parsnip: …]` markers carrying counts.
 
 | Selector | Behaviour | Reach for it when |
 |---|---|---|
-| `head-tail` *(default)* | Head + tail with a counted omission marker | You want the predictable baseline |
+| `head-tail` | Head + tail with a counted omission marker | You want the predictable baseline |
 | `token-budget` | Same budget, cut on token boundaries so identifiers are never split | Output is full of long identifiers you'd hate to see sliced |
 | `log-compact` | Strips ANSI, collapses runs of identical lines (`[parsnip: ×N]`), then bounds with head-tail | Output is repetitive logs — best ratio by a wide margin |
 | `signal-preserving` | Head + tail plus bounded middle lines matching a diagnostic pattern (errors, `file:line`, hashes, URLs) | You are reading build/test output and want the failures |
@@ -296,6 +316,28 @@ Computed from per-compression timestamps plus the session's assistant-message
 timeline. An assistant message with K tool parts counts as K+1 invocations, so the
 figure is a **lower bound**. Dedup is excluded — only an aggregate is stored, with
 no per-event timestamps to weight — so it contributes to static alone.
+
+### What was recovered
+
+A savings ledger that only ever counted what was *removed* was measuring one side
+of the bargain. Compression is justified entirely by the claim that nothing
+dropped is unrecoverable — and the plugin had no telemetry on the recovering at
+all. The known-answer eval independently found that facts with no distinguishing
+feature are recovered by **0% of every selector**, which makes recall the only
+mitigation for exactly the case where it matters most.
+
+So every `parsnip_recall` call is now counted in the same ledger:
+
+```
+recall:  retrieved x3 (+54120 chars)  misses x0  index listings x1
+```
+
+`retrieved` / `chars` are successful lookups and what they handed back; `lists`
+is index listings, the post-compaction discovery path. **`misses` is the one to
+watch** — the recall store is bounded at 1 MB / 128 entries with oldest evicted
+first, so a rising miss rate is the early warning that drops are becoming
+genuinely unrecoverable, which is the single failure mode the guarantee does not
+cover. The dumper prints a warning when it is non-zero.
 
 ### Offline, deterministic
 

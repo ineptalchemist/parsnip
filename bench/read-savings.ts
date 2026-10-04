@@ -190,6 +190,22 @@ for (const id of sessions) {
       console.log(`    ${name}: x${tally.compressions} (-${tally.charsOmitted} chars)`)
     }
 
+    // The other half of the story: what was later recovered. A `misses` count
+    // above zero is the early warning that drops are becoming unrecoverable —
+    // the recall store is bounded at 1 MB / 128 entries, oldest evicted first.
+    const recall = ledger.recall
+    if (recall && (recall.retrieved || recall.misses || recall.lists)) {
+      console.log(
+        `  recall:  retrieved x${recall.retrieved} (+${recall.chars} chars)` +
+          `  misses x${recall.misses}  index listings x${recall.lists}`,
+      )
+      if (recall.misses > 0) {
+        console.log(
+          `    WARNING: ${recall.misses} retrieval(s) found nothing — evicted by the 1 MB / 128-entry bound, or a wrong id.`,
+        )
+      }
+    }
+
     const list = events.get(id)
     const reread = list ? rereadFor(timeline.get(id) ?? [], list) : null
     if (reread) {

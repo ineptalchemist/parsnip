@@ -25,6 +25,17 @@ export type CtxGuardConfig = {
   dedup: boolean
   /** Which compression selector runs when `compression` is on. */
   selector: SelectorName
+  /**
+   * Whether *search / retrieval* results are compressed too.
+   *
+   * Off by default since 2026-10-03. Search output is a repeated record format,
+   * and every selector breaks the records apart: measured over 28 recorded
+   * search documents, only 6 of 71 results kept both their title and their
+   * excerpt, and the reordering selectors separate an excerpt from the URL it
+   * came from. Dedup is unaffected and still runs on search tools — collapsing a
+   * byte-identical repeat is not the same claim as rewriting a document.
+   */
+  searchCompression: boolean
   /** Compression threshold in chars; undefined = the selector's own default. */
   minChars?: number
 }
@@ -34,6 +45,7 @@ export type ConfigOverride = {
   compression?: boolean
   dedup?: boolean
   selector?: SelectorName
+  searchCompression?: boolean
   minChars?: number
 }
 
@@ -73,6 +85,9 @@ export const DEFAULT_CONFIG: CtxGuardConfig = {
   // measures as worth keeping, at a slightly worse ratio. It does fragment
   // identifiers the most (13 vs 9 over the compare corpus), which is the cost.
   selector: "extractive",
+  // Search results are left intact by default — see the field's doc comment for
+  // the measurement. Set this true to compress them anyway.
+  searchCompression: false,
 }
 
 export const GLOBAL_CONFIG_KEY = "parsnip:config"
@@ -90,6 +105,7 @@ export function asConfigOverride(value: unknown): ConfigOverride {
   const out: ConfigOverride = {}
   if (typeof v.compression === "boolean") out.compression = v.compression
   if (typeof v.dedup === "boolean") out.dedup = v.dedup
+  if (typeof v.searchCompression === "boolean") out.searchCompression = v.searchCompression
   if (isSelectorName(v.selector)) out.selector = v.selector
   const minChars = asMinChars(v.minChars)
   if (minChars !== undefined) out.minChars = minChars
@@ -110,6 +126,8 @@ export function resolveConfig(
     compression: sessionOverride.compression ?? globalOverride.compression ?? defaults.compression,
     dedup: sessionOverride.dedup ?? globalOverride.dedup ?? defaults.dedup,
     selector: sessionOverride.selector ?? globalOverride.selector ?? defaults.selector,
+    searchCompression:
+      sessionOverride.searchCompression ?? globalOverride.searchCompression ?? defaults.searchCompression,
     minChars: sessionOverride.minChars ?? globalOverride.minChars ?? defaults.minChars,
   }
 }
@@ -118,7 +136,9 @@ export function resolveConfig(
 export function describeConfig(config: CtxGuardConfig): string {
   const threshold = config.minChars === undefined ? "default" : `${config.minChars} chars`
   return (
-    `compression ${config.compression ? "on" : "off"}, dedup ${config.dedup ? "on" : "off"}, ` +
+    `compression ${config.compression ? "on" : "off"} ` +
+    `(search ${config.searchCompression ? "on" : "off"}), ` +
+    `dedup ${config.dedup ? "on" : "off"}, ` +
     `selector ${config.selector}, threshold ${threshold}`
   )
 }

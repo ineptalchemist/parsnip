@@ -32,7 +32,12 @@ function makeStorage() {
 }
 
 test("DEFAULT_CONFIG: compression on, dedup on, selector extractive", () => {
-  assert.deepEqual(DEFAULT_CONFIG, { compression: true, dedup: true, selector: "extractive" })
+  assert.deepEqual(DEFAULT_CONFIG, {
+    compression: true,
+    dedup: true,
+    selector: "extractive",
+    searchCompression: false,
+  })
 })
 
 test("sessionConfigKey: namespaces by session", () => {
@@ -45,17 +50,25 @@ test("resolveConfig: session override beats global beats default", () => {
     compression: true,
     dedup: true,
     selector: "extractive",
+    searchCompression: false,
     minChars: undefined,
   })
   assert.deepEqual(resolveConfig({ compression: true }), {
     compression: true,
     dedup: true,
     selector: "extractive",
+    searchCompression: false,
     minChars: undefined,
   })
   assert.deepEqual(
     resolveConfig({ compression: false, dedup: false }, { compression: true }),
-    { compression: true, dedup: false, selector: "extractive", minChars: undefined },
+    {
+      compression: true,
+      dedup: false,
+      selector: "extractive",
+      searchCompression: false,
+      minChars: undefined,
+    },
   )
 })
 
@@ -65,6 +78,7 @@ test("resolveConfig: fields resolve independently", () => {
     compression: false,
     dedup: false,
     selector: "extractive",
+    searchCompression: false,
     minChars: undefined,
   })
 })
@@ -92,12 +106,23 @@ test("asConfigOverride: narrows to booleans/selector names, drops junk", () => {
 
 test("describeConfig: on/off summary plus the selector", () => {
   assert.equal(
-    describeConfig({ compression: false, dedup: true, selector: "head-tail" }),
-    "compression off, dedup on, selector head-tail, threshold default",
+    describeConfig({
+      compression: false,
+      dedup: true,
+      selector: "head-tail",
+      searchCompression: false,
+    }),
+    "compression off (search off), dedup on, selector head-tail, threshold default",
   )
   assert.equal(
-    describeConfig({ compression: true, dedup: true, selector: "extractive", minChars: 1500 }),
-    "compression on, dedup on, selector extractive, threshold 1500 chars",
+    describeConfig({
+      compression: true,
+      dedup: true,
+      selector: "extractive",
+      searchCompression: true,
+      minChars: 1500,
+    }),
+    "compression on (search on), dedup on, selector extractive, threshold 1500 chars",
   )
 })
 
@@ -122,12 +147,14 @@ test("effectiveConfig: merges both levels", async () => {
     compression: true,
     dedup: true,
     selector: "extractive",
+    searchCompression: false,
     minChars: undefined,
   })
   assert.deepEqual(await effectiveConfig(storage, "ses_2"), {
     compression: false,
     dedup: true,
     selector: "extractive",
+    searchCompression: false,
     minChars: undefined,
   })
 })

@@ -9,7 +9,7 @@
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { SavingsLedger } from "./toolhooks.ts"
-import { asBySelector } from "./toolhooks.ts"
+import { asBySelector, asRecallTally, emptyRecallTally } from "./toolhooks.ts"
 
 export type ContinuityState = {
   lastTask: string
@@ -163,6 +163,7 @@ export function asSavings(value: unknown): SavingsLedger {
     dedups: 0,
     charsDeduped: 0,
     bySelector: {},
+    recall: emptyRecallTally(),
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return base
   const v = value as Record<string, unknown>
@@ -174,6 +175,7 @@ export function asSavings(value: unknown): SavingsLedger {
     dedups: num("dedups"),
     charsDeduped: num("charsDeduped"),
     bySelector: asBySelector(v.bySelector),
+    recall: asRecallTally(v.recall),
   }
 }
 

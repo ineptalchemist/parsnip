@@ -280,6 +280,7 @@ test("emptySavings: all fields zero, empty selector breakdown", () => {
     dedups: 0,
     charsDeduped: 0,
     bySelector: {},
+    recall: { retrieved: 0, chars: 0, misses: 0, lists: 0 },
   })
 })
 

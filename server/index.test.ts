@@ -803,7 +803,7 @@ test("config tool: toggles global compression and execute.after honors it", asyn
   const tool = added[0]
 
   const out = await tool.execute({ compression: true }, { sessionID: "ses_test" })
-  assert.match(out.content[0].text, /effective: compression on, dedup on/)
+  assert.match(out.content[0].text, /effective: compression on \(search off\), dedup on/)
   assert.deepEqual(h.store.get("parsnip:config"), { compression: true })
 
   const event = toolEvent()
@@ -821,7 +821,7 @@ test("config tool: a session override beats the global override", async () => {
 
   await tool.execute({ compression: true }, { sessionID: "ses_test" }) // global on
   const scoped = await tool.execute({ compression: false, session: true }, { sessionID: "ses_test" })
-  assert.match(scoped.content[0].text, /effective: compression off, dedup on/)
+  assert.match(scoped.content[0].text, /effective: compression off \(search off\), dedup on/)
   assert.deepEqual(h.store.get("session:ses_test:parsnip"), { compression: false })
 
   // A different session still sees the global override (compression on).
@@ -954,6 +954,79 @@ test("parsnip_recall: returns the stored text, or a not-found note", async () =>
 
   const missing = await recall.execute({ id: "recall-999" }, { sessionID: "ses_test" })
   assert.match(missing.content[0].text, /no cached text/)
+})
+
+// A search-shaped body: repeated `Title:` / `URL:` records with highlights, which
+// is the format that compression measurably breaks apart.
+function searchBody(bytes: number): string {
+  let out = ""
+  let n = 0
+  while (out.length < bytes) {
+    n += 1
+    out += `Title: Result ${n}\nURL: https://example.com/page-${n}\nPublished: N/A\nAuthor: N/A\nHighlights:\n`
+    out += `Excerpt body text for result ${n} with enough words to be worth compressing.\n...\n`
+  }
+  return out
+}
+
+// --- search compression is opt-in -------------------------------------------
+
+test("execute.after: a large search result is NOT compressed by default", async () => {
+  // Measured over 28 recorded search documents: every selector breaks the
+  // Title/URL/Highlights records apart, keeping a title with its excerpt in only
+  // 6 of 71 cases. So search compression ships off and must stay off unless asked.
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const search = () =>
+    toolEvent({
+      tool: "websearch",
+      input: { query: "opencode config" },
+      result: { content: [{ type: "text", text: searchBody(8000) }] },
+    })
+
+  const first = search()
+  await h.hooks["execute.after"](first)
+  const text = (first.result.content as Array<AnyRecord>)[0].text
+  assert.equal(text, searchBody(8000), "search results pass through untouched")
+  assert.ok(!text.includes("[parsnip:"), "no omission marker")
+  assert.equal(h.store.has("session:ses_test:recall"), false, "nothing to recall")
+})
+
+test("execute.after: search compression happens when explicitly enabled", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { searchCompression: true, selector: "head-tail" })
+
+  const event = toolEvent({
+    tool: "websearch",
+    input: { query: "opencode config" },
+    result: { content: [{ type: "text", text: searchBody(8000) }] },
+  })
+  await h.hooks["execute.after"](event)
+
+  const text = (event.result.content as Array<AnyRecord>)[0].text
+  assert.match(text, /\[parsnip: \d+ chars omitted\]/)
+  assert.ok(text.length < searchBody(8000).length / 2, `expected a bounded result, got ${text.length}`)
+})
+
+test("execute.after: dedup still applies to search tools while compression does not", async () => {
+  // Dedup is a different claim: it collapses a byte-identical repeat, and the
+  // original is already in context. Search exclusion must not take it away.
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const search = () =>
+    toolEvent({
+      tool: "websearch",
+      input: { query: "opencode config" },
+      result: { content: [{ type: "text", text: searchBody(5000) }] },
+    })
+
+  await h.hooks["execute.after"](search())
+  const second = search()
+  await h.hooks["execute.after"](second)
+  assert.equal((second.result.content as Array<AnyRecord>)[0].text, DEDUP_MARKER)
 })
 
 test("parsnip_recall: no id lists the index instead of erroring", async () => {
