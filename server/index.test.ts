@@ -940,7 +940,7 @@ test("execute.after: a compression stores the full dropped text and appends a re
 test("parsnip_recall: returns the stored text, or a not-found note", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
-  await h.ctx.storage.set("parsnip:config", { compression: true })
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
   await h.hooks["execute.after"](toolEvent())
 
   const tools = collectorEditor()
@@ -954,6 +954,47 @@ test("parsnip_recall: returns the stored text, or a not-found note", async () =>
 
   const missing = await recall.execute({ id: "recall-999" }, { sessionID: "ses_test" })
   assert.match(missing.content[0].text, /no cached text/)
+})
+
+test("parsnip_recall: no id lists the index instead of erroring", async () => {
+  // The post-compaction path: the history and its omission markers are gone, so
+  // the agent has no id to pass and must be able to discover what it dropped.
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
+  await h.hooks["execute.after"](toolEvent())
+
+  const tools = collectorEditor()
+  h.toolTransforms[0](tools.editor)
+  const recall = tools.added.find((t) => t.name === "parsnip_recall")
+  assert.ok(recall)
+
+  // `id` is optional in the schema, so a bare call must be valid.
+  assert.deepEqual(recall.input.required ?? [], [], "id must not be required")
+
+  for (const input of [{}, { id: "" }, { id: "   " }]) {
+    const out = await recall.execute(input, { sessionID: "ses_test" })
+    assert.match(out.content[0].text, /parsnip recall index/)
+    assert.match(out.content[0].text, /1 of 1 drop\(s\) retained/)
+    assert.match(out.content[0].text, /recall-1\s+shell\s+6000 chars/)
+    assert.ok(
+      !out.content[0].text.includes("x".repeat(6000)),
+      "the index must not return the dropped text itself",
+    )
+  }
+})
+
+test("parsnip_recall: an empty store lists without erroring", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const tools = collectorEditor()
+  h.toolTransforms[0](tools.editor)
+  const recall = tools.added.find((t) => t.name === "parsnip_recall")
+  assert.ok(recall)
+
+  const out = await recall.execute({}, { sessionID: "ses_test" })
+  assert.match(out.content[0].text, /nothing has been dropped/i)
 })
 
 test("execute.after: no recall entry when compression is off", async () => {

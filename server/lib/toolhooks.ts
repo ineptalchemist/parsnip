@@ -563,6 +563,64 @@ export async function loadRecall(storage: StorageDomain, sessionID: string): Pro
   return asRecallState(await storage.get(recallKey(sessionID)))
 }
 
+/**
+ * Max entries listed by `formatRecallIndex`. The listing is a convenience, not
+ * the data: anything beyond this is still retrievable by id, so the count of
+ * unlisted rows is stated rather than silently dropped — same rule the
+ * selectors follow when they omit a region.
+ */
+export const RECALL_INDEX_LIMIT = 50
+
+/** `HH:MM:SSZ`. UTC so the output is identical on every host. */
+function clockOf(at: number): string {
+  if (!Number.isFinite(at)) return "--:--:--Z"
+  return `${new Date(at).toISOString().slice(11, 19)}Z`
+}
+
+/**
+ * Render the session's recall index: what was dropped, by which tool, how big,
+ * and when — without including any of the dropped text.
+ *
+ * This is what makes dropped output reachable *after* a compaction. Before
+ * compaction the agent can read an omission marker in context; a compaction
+ * replaces the history, taking the markers with it, while this store survives
+ * in `ctx.storage`. Without a way to enumerate it, recoverable text becomes
+ * unreachable in practice.
+ *
+ * Honest about its own limits: `seq` counts every drop ever made in the session
+ * while `entries` is the bounded ring, so `seq - entries.length` is exactly how
+ * many were evicted. Saying so is the difference between an index and a promise.
+ */
+export function formatRecallIndex(state: RecallState, limit = RECALL_INDEX_LIMIT): string {
+  const retained = state.entries.length
+  const evicted = Math.max(0, state.seq - retained)
+
+  if (retained === 0) {
+    return state.seq === 0
+      ? "parsnip: nothing has been dropped in this session yet — no recall entries."
+      : `parsnip: no dropped text is retained. All ${state.seq} drop(s) from this ` +
+          `session were evicted by the ${RECALL_MEMORY}-entry / ${RECALL_BYTE_LIMIT}-byte bound.`
+  }
+
+  const newestFirst = [...state.entries].reverse()
+  const shown = newestFirst.slice(0, limit)
+  const unlisted = newestFirst.length - shown.length
+
+  const header =
+    `parsnip recall index — ${retained} of ${state.seq} drop(s) retained` +
+    (evicted > 0 ? `, ${evicted} evicted by the ${RECALL_MEMORY}-entry / 1 MB bound` : "") +
+    ".\nNewest first. Pass an id to retrieve the full text."
+
+  const lines = shown.map((entry) => {
+    const tool = entry.tool.padEnd(14).slice(0, 14)
+    return `  ${entry.id.padEnd(12)} ${tool} ${String(entry.inputChars).padStart(7)} chars  ${clockOf(entry.at)}`
+  })
+
+  const tail = unlisted > 0 ? `\n... and ${unlisted} older entr${unlisted === 1 ? "y" : "ies"} not listed; still retrievable by id.` : ""
+
+  return [header, "", ...lines].join("\n") + tail
+}
+
 /** Trim to the byte/entry bounds (oldest first) and persist; `seq` is preserved. */
 export async function saveRecall(
   storage: StorageDomain,

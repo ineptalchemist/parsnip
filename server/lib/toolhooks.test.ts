@@ -31,6 +31,7 @@ import {
   textLengthOf,
   toolHistoryKey,
   RECALL_BYTE_LIMIT,
+  formatRecallIndex,
   RECALL_MEMORY,
   appendResultText,
   asRecallState,
@@ -477,6 +478,70 @@ test("asRecallState: narrows stored JSON, tolerating junk", () => {
     entries: [good],
   })
   assert.equal(asRecallState({ seq: -1, entries: "no" }).seq, 0)
+})
+
+// --- formatRecallIndex -------------------------------------------------------
+//
+// The index is what makes dropped output reachable after a compaction: the
+// history (and its omission markers) is replaced, the store is not.
+
+test("formatRecallIndex: an empty session says so plainly", () => {
+  const out = formatRecallIndex({ seq: 0, entries: [] })
+  assert.match(out, /nothing has been dropped/i)
+  assert.equal(formatRecallIndex({ seq: 0, entries: [] }), out, "deterministic")
+})
+
+test("formatRecallIndex: entries all evicted is reported as eviction, not emptiness", () => {
+  const out = formatRecallIndex({ seq: 9, entries: [] })
+  assert.match(out, /no dropped text is retained/i)
+  assert.match(out, /All 9 drop\(s\)/)
+  assert.match(out, /evicted/)
+})
+
+test("formatRecallIndex: lists newest first with id, tool, size and a UTC clock", () => {
+  const state = {
+    seq: 2,
+    entries: [
+      { ...recallEntry(1, 1200), tool: "shell", at: Date.UTC(2026, 9, 3, 17, 52, 3) },
+      { ...recallEntry(2, 34664), tool: "websearch", at: Date.UTC(2026, 9, 3, 18, 4, 9) },
+    ],
+  }
+  const out = formatRecallIndex(state)
+  const lines = out.split("\n").filter((l) => l.trim().startsWith("recall-"))
+
+  assert.equal(lines.length, 2)
+  assert.match(lines[0], /recall-2\s+websearch\s+34664 chars\s+18:04:09Z/)
+  assert.match(lines[1], /recall-1\s+shell\s+1200 chars\s+17:52:03Z/)
+  assert.ok(out.indexOf("recall-2") < out.indexOf("recall-1"), "newest first")
+})
+
+test("formatRecallIndex: never leaks the dropped text", () => {
+  const secret = "SECRET-PAYLOAD-DO-NOT-LIST"
+  const state = { seq: 1, entries: [{ ...recallEntry(1, secret.length), text: secret, sample: secret }] }
+  const out = formatRecallIndex(state)
+  assert.ok(!out.includes(secret), "entry text must not appear in the index")
+})
+
+test("formatRecallIndex: reports how many were evicted by the retention bound", () => {
+  const out = formatRecallIndex({
+    seq: 140,
+    entries: [recallEntry(140, 10), recallEntry(139, 10)],
+  })
+  assert.match(out, /2 of 140 drop\(s\) retained/)
+  assert.match(out, /138 evicted/)
+})
+
+test("formatRecallIndex: caps the listing and says how many were unlisted", () => {
+  const entries = Array.from({ length: 5 }, (_, i) => recallEntry(i + 1, 10))
+  const out = formatRecallIndex({ seq: 5, entries }, 3)
+
+  const listed = out.split("\n").filter((l) => l.trim().startsWith("recall-"))
+  assert.equal(listed.length, 3)
+  assert.match(out, /and 2 older entries not listed/)
+  assert.match(out, /still retrievable by id/)
+
+  // Singular wording, so the message never reads as broken.
+  assert.match(formatRecallIndex({ seq: 2, entries: entries.slice(0, 2) }, 1), /and 1 older entry not listed/)
 })
 
 test("recall: round-trips, keeps seq, and is bounded by entries and bytes", async () => {

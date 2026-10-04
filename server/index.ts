@@ -77,6 +77,7 @@ import {
   compressResult,
   compressionEvent,
   dedupSignature,
+  formatRecallIndex,
   isTargetTool,
   loadRecall,
   loadRecentCompressions,
@@ -465,31 +466,50 @@ const RECALL_TOOL_NAME = "parsnip_recall"
  * Agent-facing recall, added to the tool catalog via `ctx.tool.transform`.
  * Compression is lossy to the prompt but lossless here: the omission marker in a
  * compressed result names a recall id, and this returns the full dropped text.
+ *
+ * Two modes, because an id alone is not always available. In context it is —
+ * the marker names it. After a compaction it is not: the history is replaced by
+ * a summary, the markers go with it, and the store survives without a pointer to
+ * itself. Calling with no `id` lists the index, so recovery stays discoverable
+ * rather than depending on the agent having remembered a handle.
  */
 function recallTool(ctx: Plugin.Context) {
   return {
     name: RECALL_TOOL_NAME,
     description:
-      "Retrieve the full text parsnip dropped when it compressed an oversized " +
-      "tool result. Compression is lossy to the prompt but lossless here: the " +
-      "omission marker names a recall id — pass it to get the original bytes back. " +
-      "Use when a compressed result looks like it may be missing something you need.",
+      "Retrieve tool output that parsnip dropped when it compressed an oversized " +
+      "result. Compression is lossy to the prompt but lossless here. With an id " +
+      "(named by the omission marker, e.g. recall-3) it returns the original bytes. " +
+      "With NO id it lists what has been dropped this session — id, tool, size, time — " +
+      "which is the way to recover dropped output after a compaction has replaced " +
+      "the history. Use it whenever a compressed result looks like it is missing " +
+      "something you need, or when you are unsure what a compaction threw away.",
     input: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Recall id from the omission marker, e.g. recall-3." },
+        id: {
+          type: "string",
+          description:
+            "Recall id from the omission marker, e.g. recall-3. Omit to list what has " +
+            "been dropped this session instead of retrieving one entry.",
+        },
       },
-      required: ["id"],
       additionalProperties: false,
     },
     execute: async (rawInput: unknown, toolContext: { sessionID: string }) => {
       const input = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>
       const id = typeof input.id === "string" ? input.id.trim() : ""
       const state = await loadRecall(ctx.storage, toolContext.sessionID)
+
+      // No id (or a blank one) lists the index rather than erroring. The previous
+      // not-found message already spoke of "(no id given)", so this was always
+      // the intended fallback — it just had nothing useful to say.
+      if (id === "") return { content: [{ type: "text", text: formatRecallIndex(state) }] }
+
       const entry = state.entries.find((e) => e.id === id)
       const text = entry
         ? `parsnip recall ${id} — ${entry.inputChars} chars, tool ${entry.tool}:\n\n${entry.text}`
-        : `parsnip: no cached text for ${id || "(no id given)"} — it may have been evicted, or the id is wrong.`
+        : `parsnip: no cached text for ${id} — it may have been evicted, or the id is wrong.`
       return { content: [{ type: "text", text }] }
     },
   }

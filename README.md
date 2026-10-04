@@ -10,8 +10,14 @@ frustrating rabbit holes.
 So, Parsnip keeps the context it cuts preserved in a cache that your agent can reference if something looks off. 
 All the information you need is preserved, your agents context window is cleared from debris, and you save a couple bucks. 
 
-Designed to work in tandem with OpenCode's native token-compaction processes. So, compression hardly actually fires off. It only engages when a tool
-returns something large *and* few-lined, which means the saving depends almost entirely on your workload — run `npm run savings` to see your own.
+Designed to work in tandem with OpenCode's native token-compaction processes, so it
+competes with nothing. What it engages on depends sharply on the tool. Measured
+over the recorded transcripts (~500 completed calls): `websearch` clears the
+threshold on **100%** of calls (avg 15.8k chars, and *above* the 20 000-byte
+native cap, so the built-in truncation is not catching it), `webfetch` on 93%, but
+plain `bash` on only **6%** — most shell output is simply small. So the saving is
+concentrated in search and retrieval, not in the shell. Run `npm run savings` for
+your own figures.
 The effect compounds: because the prompt is now permanently shorter, compressed tokens are never re-transmitted on any later call, so the static
 figure understates the real saving by roughly two orders of magnitude. And its free, with zero context actually stripped. Inspired by the [Token Optimizer](https://github.com/alexgreensh/token-optimizer) approach, 
 which tries to avoid model-led summarization as it can be context-destructive and cost you more tokens in the long-run. 
@@ -44,6 +50,32 @@ tool call:
 ```
 parsnip_recall { id: "recall-3" }
 ```
+
+### After a compaction, the id is gone — so ask
+
+A compaction replaces the history with a summary, and the omission markers go with
+it. The store survives in `ctx.storage`, but nothing in the surviving context
+points *at* it, which would leave genuinely recoverable text unreachable in
+practice. So `id` is optional:
+
+```
+parsnip_recall { }        # no id: what has been dropped this session?
+```
+
+```
+parsnip recall index — 2 of 2 drop(s) retained.
+Newest first. Pass an id to retrieve the full text.
+
+  recall-2     shell            13519 chars  23:09:50Z
+  recall-1     shell            20147 chars  23:07:58Z
+```
+
+Recovery stays *discoverable* rather than depending on the agent having kept a
+handle in mind. The index is honest about its own limits: `seq` counts every drop
+ever made in the session while the entries are a bounded ring, so it reports how
+many were **evicted** rather than implying full coverage. A listing past 50 rows
+says how many it left out. No dropped text appears in the index — retrieving it
+still requires an explicit id.
 
 A human gets `/parsnip recall <id>`, which only logs the size — V2 commands cannot
 return output, so the tool is the real retrieval path. The store is bounded at
