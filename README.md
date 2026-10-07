@@ -12,7 +12,7 @@ the loop, no rewriting your conversation.
 Parsnip is (a) largely vibecoded and
            (b) still a work in progress. 
 
-So keep that in mind. That being said, I think it's a pretty safe, low-profile way to cut your context window by about 2%-5%.
+So keep that in mind. That being said, I think it's a pretty safe, low-profile way to cut your context window by about 2-5%.
 
 There's simple CLI tools you can call manually, but I mostly just
 tell an agent what to activate. 
