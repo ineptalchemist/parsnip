@@ -120,7 +120,7 @@ export function appendActiveFile(
  * session that compacts later cannot tell the threshold or selector was moved.
  */
 export function describeDecision(
-  patch: { compression?: boolean; dedup?: boolean; selector?: string; minChars?: number },
+  patch: { compression?: boolean; searchCompression?: boolean; dedup?: boolean; selector?: string; minChars?: number },
   scope: string,
   reset = false,
 ): string {
@@ -128,6 +128,9 @@ export function describeDecision(
   const parts: string[] = []
   if (typeof patch.compression === "boolean") {
     parts.push(`compression ${patch.compression ? "on" : "off"}`)
+  }
+  if (typeof patch.searchCompression === "boolean") {
+    parts.push(`search compression ${patch.searchCompression ? "on" : "off"}`)
   }
   if (typeof patch.dedup === "boolean") parts.push(`dedup ${patch.dedup ? "on" : "off"}`)
   if (patch.selector) parts.push(`selector ${patch.selector}`)

@@ -481,8 +481,8 @@ const RECALL_TOOL_NAME = "parsnip_recall"
  * This exists because compression is justified entirely by the claim that
  * nothing dropped is unrecoverable — and until this was added, the plugin
  * measured the dropping to the character while not measuring the recovering at
- * all. `misses` is the field to watch: the recall store is bounded at 1 MB / 128
- * entries, so a rising miss rate is the early warning that drops are becoming
+ * all. `misses` is the field to watch: the recall store is bounded at 1M chars /
+ * 128 entries, so a rising miss rate is the early warning that drops are becoming
  * genuinely unrecoverable, which is the one thing the guarantee does not cover.
  */
 async function countRecall(
@@ -490,11 +490,18 @@ async function countRecall(
   sessionID: string,
   event: { retrieved?: number; missed?: boolean; listed?: boolean },
 ): Promise<void> {
-  await saveSavings(
-    ctx.storage,
-    sessionID,
-    addRecall(await loadSavings(ctx.storage, sessionID), event),
-  )
+  // Best-effort by contract: the retrieval is already in hand by the time this
+  // runs, so a storage failure must never turn a successful lookup — or an
+  // index listing — into a tool error. Logged, not thrown, for the operator.
+  try {
+    await saveSavings(
+      ctx.storage,
+      sessionID,
+      addRecall(await loadSavings(ctx.storage, sessionID), event),
+    )
+  } catch (error) {
+    console.error("[parsnip] recall telemetry failed (ignored):", error)
+  }
 }
 
 /**
@@ -549,13 +556,13 @@ function recallTool(ctx: Plugin.Context) {
         ? `parsnip recall ${id} — ${entry.inputChars} chars, tool ${entry.tool}:\n\n${entry.text}`
         : `parsnip: no cached text for ${id} — it may have been evicted, or the id is wrong.`
 
-      // Best-effort telemetry: the answer is already in hand, so a storage
-      // failure here must never cost the agent its retrieval.
+      // countRecall is best-effort by contract: a storage failure never costs
+      // the agent its retrieval.
       await countRecall(
         ctx,
         toolContext.sessionID,
         entry ? { retrieved: entry.text.length } : { missed: true },
-      ).catch(() => {})
+      )
 
       return { content: [{ type: "text", text }] }
     },

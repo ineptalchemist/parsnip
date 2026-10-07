@@ -269,6 +269,17 @@ test("describeDecision: records a threshold change", () => {
   )
 })
 
+test("describeDecision: records a search-compression change", () => {
+  assert.equal(
+    describeDecision({ searchCompression: true }, "global"),
+    "parsnip: search compression on (global)",
+  )
+  assert.equal(
+    describeDecision({ compression: true, searchCompression: false }, "session"),
+    "parsnip: compression on, search compression off (session)",
+  )
+})
+
 test("appendDecision: dedupes, bounds, and reports no-change", () => {
   assert.deepEqual(appendDecision([], "d1"), ["d1"])
   assert.equal(appendDecision(["d1"], "d1"), undefined, "a repeat is not a change")

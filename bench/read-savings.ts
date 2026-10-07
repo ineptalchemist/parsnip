@@ -192,7 +192,7 @@ for (const id of sessions) {
 
     // The other half of the story: what was later recovered. A `misses` count
     // above zero is the early warning that drops are becoming unrecoverable —
-    // the recall store is bounded at 1 MB / 128 entries, oldest evicted first.
+    // the recall store is bounded at 1M chars / 128 entries, oldest evicted first.
     const recall = ledger.recall
     if (recall && (recall.retrieved || recall.misses || recall.lists)) {
       console.log(
@@ -201,7 +201,7 @@ for (const id of sessions) {
       )
       if (recall.misses > 0) {
         console.log(
-          `    WARNING: ${recall.misses} retrieval(s) found nothing — evicted by the 1 MB / 128-entry bound, or a wrong id.`,
+          `    WARNING: ${recall.misses} retrieval(s) found nothing — evicted by the 1M-char / 128-entry bound, or a wrong id.`,
         )
       }
     }

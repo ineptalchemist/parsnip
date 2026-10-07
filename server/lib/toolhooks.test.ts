@@ -30,7 +30,7 @@ import {
   stableJson,
   textLengthOf,
   toolHistoryKey,
-  RECALL_BYTE_LIMIT,
+  RECALL_CHAR_LIMIT,
   formatRecallIndex,
   RECALL_MEMORY,
   appendResultText,
@@ -545,7 +545,7 @@ test("formatRecallIndex: caps the listing and says how many were unlisted", () =
   assert.match(formatRecallIndex({ seq: 2, entries: entries.slice(0, 2) }, 1), /and 1 older entry not listed/)
 })
 
-test("recall: round-trips, keeps seq, and is bounded by entries and bytes", async () => {
+test("recall: round-trips, keeps seq, and is bounded by entries and chars", async () => {
   const { storage, store } = memStorage()
   assert.deepEqual(await loadRecall(storage, "ses_1"), { seq: 0, entries: [] })
 
@@ -559,15 +559,15 @@ test("recall: round-trips, keeps seq, and is bounded by entries and bytes", asyn
   assert.equal(state.seq, 40) // seq is preserved through trimming
   assert.equal(state.entries.at(-1)?.id, `recall-${RECALL_MEMORY + 4}`)
 
-  // Byte cap: the oldest entries are evicted until under the limit.
-  const big = Math.ceil(RECALL_BYTE_LIMIT / 4) + 10
+  // Character cap: the oldest entries are evicted until under the limit.
+  const big = Math.ceil(RECALL_CHAR_LIMIT / 4) + 10
   await saveRecall(storage, "ses_2", {
     seq: 5,
     entries: [1, 2, 3, 4, 5].map((n) => recallEntry(n, big)),
   })
   state = await loadRecall(storage, "ses_2")
-  const bytes = state.entries.reduce((n, e) => n + e.text.length, 0)
-  assert.ok(bytes <= RECALL_BYTE_LIMIT, `kept ${bytes} bytes`)
+  const chars = state.entries.reduce((n, e) => n + e.text.length, 0)
+  assert.ok(chars <= RECALL_CHAR_LIMIT, `kept ${chars} chars`)
   assert.equal(state.entries.at(-1)?.id, "recall-5") // newest kept
   assert.ok(!state.entries.some((e) => e.id === "recall-1")) // oldest evicted
   assert.ok(store.has(recallKey("ses_2")))

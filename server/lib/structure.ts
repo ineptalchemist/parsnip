@@ -197,11 +197,6 @@ export function classifySkills(
   }))
 }
 
-export type ReportOptions = {
-  unusedServersOnly: boolean
-  unusedSkillsOnly: boolean
-}
-
 export const REPORT_OPTIONS: ReportOptions = {
   unusedServersOnly: REPORT_DEAD_WEIGHT_ONLY,
   unusedSkillsOnly: true,

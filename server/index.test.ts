@@ -1057,6 +1057,41 @@ test("parsnip_recall: no id lists the index instead of erroring", async () => {
   }
 })
 
+test("parsnip_recall: a failing savings write never breaks the answer", async () => {
+  // Recall telemetry is best-effort: the answer is already in hand, so a
+  // storage failure must not turn a listing — or a lookup — into a tool error.
+  // The listing path was unguarded until this; both paths go through
+  // countRecall, which now swallows and logs its own storage failures.
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
+  await h.hooks["execute.after"](toolEvent())
+
+  const tools = collectorEditor()
+  h.toolTransforms[0](tools.editor)
+  const recall = tools.added.find((t) => t.name === "parsnip_recall")
+  assert.ok(recall)
+
+  const realSet = h.ctx.storage.set
+  h.ctx.storage.set = async (key: string, value: unknown) => {
+    if (typeof key === "string" && key.endsWith(":savings")) throw new Error("ledger down")
+    return realSet(key, value)
+  }
+
+  const lines = await captureConsoleError(async () => {
+    const listed = await recall.execute({}, { sessionID: "ses_test" })
+    assert.match(listed.content[0].text, /1 of 1 drop\(s\) retained/)
+
+    const found = await recall.execute({ id: "recall-1" }, { sessionID: "ses_test" })
+    assert.ok(found.content[0].text.includes("x".repeat(6000)), "the full text still comes back")
+  })
+
+  assert.ok(
+    lines.some((line) => line.includes("recall telemetry failed")),
+    `expected a logged telemetry failure, got ${JSON.stringify(lines)}`,
+  )
+})
+
 test("parsnip_recall: an empty store lists without erroring", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
@@ -1180,6 +1215,25 @@ test("config tool: minChars alone is both applied and recorded", async () => {
 
   // The value must survive the read path the hook actually uses.
   assert.equal((await effectiveConfig(h.ctx.storage, "ses_test")).minChars, 1500)
+})
+
+test("config tool: searchCompression alone is both applied and recorded", async () => {
+  // The same shape of gap `minChars` had: a field applied by the write path but
+  // missing from describeDecision leaves no trace in the continuity block.
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const { added, editor } = collectorEditor()
+  h.toolTransforms[0](editor)
+
+  await added[0].execute({ searchCompression: true }, { sessionID: "ses_test" })
+  assert.deepEqual(h.store.get("parsnip:config"), { searchCompression: true }, "the setting was written")
+  const state = h.store.get("session:ses_test") as AnyRecord
+  assert.deepEqual(
+    state.decisions,
+    ["parsnip: search compression on (global)"],
+    "and it left a trace",
+  )
 })
 
 test("config command: records a decision, preserving the other fields", async () => {

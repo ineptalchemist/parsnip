@@ -78,7 +78,7 @@ still requires an explicit id.
 
 A human gets `/parsnip recall <id>`, which only logs the size — V2 commands cannot
 return output, so the tool is the real retrieval path. The store is bounded at
-**1 MB / 128 entries per session**, oldest evicted first.
+**1M characters / 128 entries per session**, oldest evicted first.
 
 **Why this is a guarantee and not a promise.** A built-in known-answer eval plants
 unique facts at controlled depths and scores what each compression method actually
@@ -219,9 +219,10 @@ call, so a toggle takes effect on the next tool call with no hot reload.
 ### The threshold
 
 `minChars` sets both the gate **and** how much is kept: 40% from the front, 30%
-from the back. Range 800–200000; an out-of-range value is rejected rather than
-clamped. Because the budget always sits below the gate, the threshold is the
-effective floor — nothing under it compacts.
+from the back. Range 800–200000; an out-of-range value is ignored rather than
+clamped (silently — confirm with `parsnip_config`). Because the budget always
+sits below the gate, the threshold is the effective floor — nothing under it
+compacts.
 
 The default stays at 4000 because sweeping lower costs more than it saves on the
 results that matter. It is an escape hatch, not a better default; see
@@ -334,7 +335,7 @@ recall:  retrieved x3 (+54120 chars)  misses x0  index listings x1
 
 `retrieved` / `chars` are successful lookups and what they handed back; `lists`
 is index listings, the post-compaction discovery path. **`misses` is the one to
-watch** — the recall store is bounded at 1 MB / 128 entries with oldest evicted
+watch** — the recall store is bounded at 1M characters / 128 entries with oldest evicted
 first, so a rising miss rate is the early warning that drops are becoming
 genuinely unrecoverable, which is the single failure mode the guarantee does not
 cover. The dumper prints a warning when it is non-zero.

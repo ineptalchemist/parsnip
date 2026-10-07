@@ -143,7 +143,7 @@ export type SelectorTally = {
  *
  * So: `retrieved` is a successful by-id retrieval, `chars` what it handed back,
  * `misses` an id that was not there (evicted, or wrong), and `lists` an index
- * listing. `misses` matters because the store is bounded at 1 MB / 128 entries,
+ * listing. `misses` matters because the store is bounded at 1M chars / 128 entries,
  * so a rising miss rate is the early warning that drops are becoming
  * unrecoverable — the one failure mode the recall guarantee does not cover.
  */
@@ -618,8 +618,12 @@ export async function saveRecentCompressions(
 // entry count; oldest evicted first. This is the backstop for the fact that no
 // selector — literal or model — can know a priori what matters.
 
-/** Max bytes of dropped text retained per session. */
-export const RECALL_BYTE_LIMIT = 1024 * 1024
+/**
+ * Max characters of dropped text retained per session. Measured in the same
+ * UTF-16 code units as every other char figure here (`text.length`), so it is a
+ * character bound, not a byte bound.
+ */
+export const RECALL_CHAR_LIMIT = 1024 * 1024
 /** Max recall entries retained per session. */
 export const RECALL_MEMORY = 128
 
@@ -696,7 +700,7 @@ export function formatRecallIndex(state: RecallState, limit = RECALL_INDEX_LIMIT
     return state.seq === 0
       ? "parsnip: nothing has been dropped in this session yet — no recall entries."
       : `parsnip: no dropped text is retained. All ${state.seq} drop(s) from this ` +
-          `session were evicted by the ${RECALL_MEMORY}-entry / ${RECALL_BYTE_LIMIT}-byte bound.`
+          `session were evicted by the ${RECALL_MEMORY}-entry / ${RECALL_CHAR_LIMIT}-char bound.`
   }
 
   const newestFirst = [...state.entries].reverse()
@@ -705,7 +709,7 @@ export function formatRecallIndex(state: RecallState, limit = RECALL_INDEX_LIMIT
 
   const header =
     `parsnip recall index — ${retained} of ${state.seq} drop(s) retained` +
-    (evicted > 0 ? `, ${evicted} evicted by the ${RECALL_MEMORY}-entry / 1 MB bound` : "") +
+    (evicted > 0 ? `, ${evicted} evicted by the ${RECALL_MEMORY}-entry / 1M-char bound` : "") +
     ".\nNewest first. Pass an id to retrieve the full text."
 
   const lines = shown.map((entry) => {
@@ -725,9 +729,9 @@ export async function saveRecall(
   state: RecallState,
 ): Promise<void> {
   let entries = state.entries.slice(-RECALL_MEMORY)
-  let bytes = entries.reduce((n, e) => n + e.text.length, 0)
-  while (entries.length > 0 && bytes > RECALL_BYTE_LIMIT) {
-    bytes -= entries[0].text.length
+  let chars = entries.reduce((n, e) => n + e.text.length, 0)
+  while (entries.length > 0 && chars > RECALL_CHAR_LIMIT) {
+    chars -= entries[0].text.length
     entries = entries.slice(1)
   }
   const bounded: RecallState = { seq: state.seq, entries }
