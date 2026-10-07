@@ -428,8 +428,8 @@ export function lineShape(line: string): string {
  *    the full weight and a shape repeated 50 times scores 1/50 of it. This is
  *    the term that lets the selector find content with no shallow signal, and
  *    also the one that makes the known-answer eval circular on the
- *    `shape-novel` class: it wins that class by construction (see the README's
- *    salience section). Do not read its eval score as evidence of general
+ *    `shape-novel` class: it wins that class by construction (see NOTES.md,
+ *    "Salience"). Do not read its eval score as evidence of general
  *    value-preservation.
  *
  * Scores only *select*; output order is always original order.
