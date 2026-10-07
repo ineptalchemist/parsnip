@@ -9,6 +9,14 @@ recorded sessions: **96.6% of input tokens served from cache**.
 Everything it drops is recoverable in one tool call. No summaries, no model in
 the loop, no rewriting your conversation.
 
+Parsnip is (a) largely vibecoded and
+           (b) still a work in progress. 
+
+So keep that in mind. That being said, I think it's a pretty safe, low-profile way to cut your context window by about 2%-5%.
+
+There's simple CLI tools you can call manually, but I mostly just
+tell an agent what to activate. 
+
 ## Why
 
 Long sessions are expensive because every model call re-sends the whole prompt.
