@@ -74,6 +74,7 @@ retrieval has to exist. That sentence is the whole design.
 | `execute.after` | Collapses a byte-identical large result (content-addressed: a changed re-run never collapses), then compresses oversized results before commit. The only mutating surface. |
 | `compaction` | Injects a continuity block (task, last command, decisions, active files, occupancy) into the *summarizer's* system prompt. The main model stays the summarizer. |
 | `context` / `prompt` / `execute.before` / events | Occupancy readings, continuity state, usage ledger. Strictly read-only on the request. |
+| `parsnip_context` | Read-only attribution report — which tools and categories fill the window, the session's per-tool ledger, and the authoritative provider totals. |
 
 Only two surfaces may write content, and both operate on data not yet sent to
 the provider. A regression test pins the read-only half.
@@ -95,6 +96,31 @@ plus counted `[parsnip: …]` markers, never generated text:
 | `token-budget` | Long identifiers you'd hate to see sliced |
 | `log-compact` | Repetitive logs — best ratio by a wide margin |
 | `signal-preserving` | Build/test output — rescues error-shaped middle lines |
+
+## Context attribution — what's filling the window
+
+`parsnip_context` reports where the context actually goes — which tools and
+categories it is made of — not just what it cost. Three kinds of numbers, kept
+deliberately separate:
+
+- **exact** — observed characters, per tool and category
+- **~estimated** — tokens, chars ÷ a chars-per-token ratio (always marked `~`)
+- **authoritative** — provider totals (input / output / reasoning / cache / cost)
+
+```
+parsnip_context                        # last request composition + provider totals
+parsnip_context { scope: "both" }      # + the session-wide per-tool ledger
+parsnip_context { scope: "session", topN: 20 }
+```
+
+The per-tool `~` figures are estimates, never billing facts — only the provider
+totals block is authoritative. The ratio starts at an install-measured fallback
+(3.5 chars/token, from `npm run calibrate` over 11,751 request pairs) and
+switches to the session's own measurement once it has paired ≥ 3 requests with
+their usage deltas. Counters only: no tool text is stored or returned.
+
+Current session only (child sessions keep their own records); counting starts
+when capture is enabled (no backfill); code-mode MCP calls surface as `execute`.
 
 ## Config
 
@@ -125,6 +151,7 @@ is early and actively growing:
 | `npm run sweep` | Threshold sweep across nine settings |
 | `npm run bench` | Mechanism ceiling on realistic shell output |
 | `npm run savings` | Live: real token usage, static chars removed, reread multiplier, and recall activity per session |
+| `npm run calibrate` | Empirical chars-per-token ratio from real usage, per model |
 
 The known-answer eval computes salience rather than hand-tagging it, so a method
 can't win its own class by authorial accident. Its headline — no selector,
@@ -143,7 +170,9 @@ More harness, corpus, and arms to come.
   touched. Parsnip never edits your configuration (the structure report is
   read-only diagnostics; the prune was removed 2026-10-03).
 - The `chars / 4` figure is an occupancy estimate only; the authoritative token
-  measurement is the `session.usage.updated` ledger.
+  measurement is the `session.usage.updated` ledger. Likewise `parsnip_context`'s
+  `~` token figures are estimates — its provider-totals block is the only
+  billing-grade number, and the tool is read-only (no model call, no stored text).
 
 ## Development
 
@@ -153,6 +182,8 @@ npm run test:bench  # bench suites
 ```
 
 Zero runtime dependencies — `@opencode/plugin` is types-only, pinned to the
-installed OpenCode version. Node 24 runs the `.ts` sources directly. File map,
-threshold analysis, the salience finding, and known gaps:
+installed OpenCode version. Node 24 runs the `.ts` sources directly.
+[`FILE_MAP.md`](./FILE_MAP.md) is the file and function map;
+[`ATTRIBUTION.md`](./ATTRIBUTION.md) walks the `parsnip_context` implementation;
+threshold analysis, the salience finding, and known gaps live in
 [NOTES.md](./NOTES.md).
