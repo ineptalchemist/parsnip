@@ -198,6 +198,9 @@ here because each is easy to get wrong silently:
   `/parsnip context` text path in v1. Capture defaults ON — it changes no
   request bytes.
 
+Implementation walkthrough (data flow, hooks, calibration mechanics, safety
+model): [`ATTRIBUTION.md`](./ATTRIBUTION.md).
+
 ### Calibration (2026-10-08)
 
 The fallback ratio is measured, not guessed: `npm run calibrate` pairs each
