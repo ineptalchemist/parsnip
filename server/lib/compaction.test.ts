@@ -62,6 +62,20 @@ test("buildContinuityBlock: derives the task from the last user message when sta
   assert.match(block, /Current task: fix the failing test/)
 })
 
+test("buildContinuityBlock: renders the sentinel verbatim when provided", () => {
+  const block = buildContinuityBlock({ sentinel: "PCOMPACT-abc12345" })
+  assert.match(block, /\[parsnip continuity\]/)
+  assert.match(block, /preserve this exact token verbatim in your summary: PCOMPACT-abc12345/)
+})
+
+test("buildContinuityBlock: a sentinel alone is still worth injecting", () => {
+  // With no continuity state and no messages, the sentinel must still produce a
+  // block — the faithful-injection probe is meaningful by itself.
+  const block = buildContinuityBlock({ sentinel: "PCOMPACT-abc12345" })
+  assert.ok(block.length > 0)
+  assert.match(block, /PCOMPACT-abc12345/)
+})
+
 test("promptText: reads the common carriers defensively", () => {
   // V2's PromptInput.Prompt is an opaque Effect Schema, so the reader tries the
   // likely shapes rather than assuming one.

@@ -31,12 +31,13 @@ function makeStorage() {
   return { store, storage }
 }
 
-test("DEFAULT_CONFIG: compression on, dedup on, selector extractive", () => {
+test("DEFAULT_CONFIG: compression on, dedup on, selector extractive, probe off", () => {
   assert.deepEqual(DEFAULT_CONFIG, {
     compression: true,
     dedup: true,
     selector: "extractive",
     searchCompression: false,
+    probe: false,
   })
 })
 
@@ -51,6 +52,7 @@ test("resolveConfig: session override beats global beats default", () => {
     dedup: true,
     selector: "extractive",
     searchCompression: false,
+    probe: false,
     minChars: undefined,
   })
   assert.deepEqual(resolveConfig({ compression: true }), {
@@ -58,6 +60,7 @@ test("resolveConfig: session override beats global beats default", () => {
     dedup: true,
     selector: "extractive",
     searchCompression: false,
+    probe: false,
     minChars: undefined,
   })
   assert.deepEqual(
@@ -67,6 +70,7 @@ test("resolveConfig: session override beats global beats default", () => {
       dedup: false,
       selector: "extractive",
       searchCompression: false,
+      probe: false,
       minChars: undefined,
     },
   )
@@ -79,6 +83,7 @@ test("resolveConfig: fields resolve independently", () => {
     dedup: false,
     selector: "extractive",
     searchCompression: false,
+    probe: false,
     minChars: undefined,
   })
 })
@@ -111,8 +116,9 @@ test("describeConfig: on/off summary plus the selector", () => {
       dedup: true,
       selector: "head-tail",
       searchCompression: false,
+      probe: false,
     }),
-    "compression off (search off), dedup on, selector head-tail, threshold default",
+    "compression off (search off), dedup on, selector head-tail, threshold default, probe off",
   )
   assert.equal(
     describeConfig({
@@ -120,9 +126,10 @@ test("describeConfig: on/off summary plus the selector", () => {
       dedup: true,
       selector: "extractive",
       searchCompression: true,
+      probe: true,
       minChars: 1500,
     }),
-    "compression on (search on), dedup on, selector extractive, threshold 1500 chars",
+    "compression on (search on), dedup on, selector extractive, threshold 1500 chars, probe on",
   )
 })
 
@@ -148,6 +155,7 @@ test("effectiveConfig: merges both levels", async () => {
     dedup: true,
     selector: "extractive",
     searchCompression: false,
+    probe: false,
     minChars: undefined,
   })
   assert.deepEqual(await effectiveConfig(storage, "ses_2"), {
@@ -155,6 +163,7 @@ test("effectiveConfig: merges both levels", async () => {
     dedup: true,
     selector: "extractive",
     searchCompression: false,
+    probe: false,
     minChars: undefined,
   })
 })

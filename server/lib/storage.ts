@@ -120,7 +120,7 @@ export function appendActiveFile(
  * session that compacts later cannot tell the threshold or selector was moved.
  */
 export function describeDecision(
-  patch: { compression?: boolean; searchCompression?: boolean; dedup?: boolean; selector?: string; minChars?: number },
+  patch: { compression?: boolean; searchCompression?: boolean; dedup?: boolean; probe?: boolean; selector?: string; minChars?: number },
   scope: string,
   reset = false,
 ): string {
@@ -133,6 +133,7 @@ export function describeDecision(
     parts.push(`search compression ${patch.searchCompression ? "on" : "off"}`)
   }
   if (typeof patch.dedup === "boolean") parts.push(`dedup ${patch.dedup ? "on" : "off"}`)
+  if (typeof patch.probe === "boolean") parts.push(`probe ${patch.probe ? "on" : "off"}`)
   if (patch.selector) parts.push(`selector ${patch.selector}`)
   // Presence, not `typeof`: `/parsnip threshold default` hands back an explicit
   // `minChars: undefined`, and handing the threshold back to its own default is

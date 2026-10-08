@@ -287,6 +287,16 @@ test("compaction hook: injects the continuity block but does not own the summary
   assert.match(injected.text, /Active files: server\/index\.ts/)
 
   assert.equal(event.result, undefined, "compaction must not take over the summary")
+
+  // The probe records the firing: injected, block length, and system-part delta.
+  const probe = h.store.get("session:ses_test:compaction-probe") as AnyRecord
+  assert.ok(probe, "no compaction-probe record written")
+  assert.equal(probe.fires, 1)
+  assert.equal(probe.injected, true)
+  assert.ok(probe.blockChars > 0)
+  assert.equal(probe.systemPartsBefore, 1)
+  assert.equal(probe.systemPartsAfter, 2)
+  assert.equal(probe.resultWasSet, false)
 })
 
 test("compaction hook: injects nothing when there is no continuity to carry", async () => {
@@ -299,6 +309,46 @@ test("compaction hook: injects nothing when there is no continuity to carry", as
   await h.hooks.compaction(event)
 
   assert.equal(event.system.length, 1, "no empty continuity part should be pushed")
+
+  const probe = h.store.get("session:ses_test:compaction-probe") as AnyRecord
+  assert.equal(probe.fires, 1, "the probe records a no-op firing too")
+  assert.equal(probe.injected, false)
+  assert.equal(probe.blockChars, 0)
+  assert.equal(probe.systemPartsAfter, 1)
+})
+
+test("compaction hook: probe on injects a sentinel and records it, awaiting the verdict", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { probe: true })
+
+  const event = contextEvent({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
+  })
+  await h.hooks.compaction(event)
+
+  // With probe on, the sentinel is worth injecting even with no continuity state.
+  const injected = event.system[1]
+  assert.match(injected.text, /preserve this exact token verbatim in your summary: PCOMPACT-[0-9a-f]{8}/)
+
+  const probe = h.store.get("session:ses_test:compaction-probe") as AnyRecord
+  assert.match(probe.sentinel, /^PCOMPACT-[0-9a-f]{8}$/)
+  assert.equal(probe.sentinelFound, undefined, "verdict awaits the compaction.ended event")
+})
+
+test("compaction hook: probe off leaves no sentinel", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { probe: false })
+
+  const event = contextEvent({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
+  })
+  await h.hooks.compaction(event)
+
+  assert.equal(event.system.length, 1, "nothing injected with no continuity and probe off")
+  const probe = h.store.get("session:ses_test:compaction-probe") as AnyRecord
+  assert.equal(probe.sentinel, undefined)
 })
 
 // --- Phase 2: tool hooks ----------------------------------------------------
@@ -993,6 +1043,31 @@ test("parsnip_context: defaults to current scope and states empty stores explici
   assert.ok(!text.includes("Session tool ledger"), "ledger hidden by default")
 })
 
+test("parsnip_context: session scope includes the compaction probe, current does not", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("session:ses_test:compaction-probe", {
+    fires: 2,
+    injected: true,
+    blockChars: 240,
+    systemPartsBefore: 4,
+    systemPartsAfter: 5,
+    resultWasSet: false,
+    agent: "build",
+    updatedAt: 1,
+  })
+
+  const tool = findContextTool(h)
+
+  const session = await tool.execute({ scope: "session" }, { sessionID: "ses_test" })
+  assert.match(session.content[0].text, /Compaction probe \(last firing/)
+  assert.match(session.content[0].text, /fired 2 time\(s\) · agent build/)
+  assert.match(session.content[0].text, /injected yes · block 240 chars · system 4 -> 5/)
+
+  const current = await tool.execute({ scope: "current" }, { sessionID: "ses_test" })
+  assert.ok(!current.content[0].text.includes("Compaction probe"), "probe hidden for current scope")
+})
+
 test("parsnip_context: topN widens the per-tool list", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
@@ -1652,5 +1727,58 @@ test("session.deleted: prunes the deleted session's keys, leaving other sessions
   assert.ok(pruned, "the deleted session's recall key was pruned")
   assert.equal(h.store.has("session:ses_test:savings"), false, "all of the session's keys go")
   assert.equal(h.store.has("session:other:recall"), true, "another session is untouched")
+})
+
+test("session.compaction.ended: records the sentinel survival verdict", async () => {
+  const h = makeHarness({
+    events: [
+      { type: "session.compaction.ended", data: { sessionID: "ses_test", text: "summary … PCOMPACT-abc12345 … done" } },
+    ],
+  })
+  // Seed a probe with a sentinel and no verdict yet.
+  h.store.set("session:ses_test:compaction-probe", {
+    fires: 1,
+    injected: true,
+    blockChars: 300,
+    systemPartsBefore: 4,
+    systemPartsAfter: 5,
+    resultWasSet: false,
+    sentinel: "PCOMPACT-abc12345",
+    updatedAt: 1,
+  })
+
+  await ctxGuard.setup(h.ctx)
+
+  const recorded = await until(() => {
+    const probe = h.store.get("session:ses_test:compaction-probe") as AnyRecord
+    return probe?.sentinelFound === true
+  })
+  assert.ok(recorded, "the survival verdict was recorded")
+})
+
+test("session.compaction.ended: records a miss when the sentinel is absent", async () => {
+  const h = makeHarness({
+    events: [
+      { type: "session.compaction.ended", data: { sessionID: "ses_test", text: "a summary without the token" } },
+    ],
+  })
+  h.store.set("session:ses_test:compaction-probe", {
+    fires: 1,
+    injected: true,
+    blockChars: 300,
+    systemPartsBefore: 4,
+    systemPartsAfter: 5,
+    resultWasSet: false,
+    sentinel: "PCOMPACT-abc12345",
+    updatedAt: 1,
+  })
+
+  await ctxGuard.setup(h.ctx)
+
+  const recorded = await until(() => {
+    const probe = h.store.get("session:ses_test:compaction-probe") as AnyRecord
+    return probe?.sentinelFound === false
+  })
+  assert.ok(recorded, "the miss verdict was recorded")
 })
 

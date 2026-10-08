@@ -45,6 +45,13 @@ import {
   type AttributionReport,
 } from "./lib/attribution.ts"
 import { buildContinuityBlock, promptText as promptInputText, truncate } from "./lib/compaction.ts"
+import {
+  loadCompactionProbe,
+  makeSentinel,
+  recordCompactionProbe,
+  recordCompactionVerdict,
+  saveCompactionProbe,
+} from "./lib/compaction-probe.ts"
 import { measureContext } from "./lib/quality.ts"
 import {
   appendActiveFile,
@@ -429,7 +436,10 @@ function configTool(ctx: Plugin.Context) {
       "View or change parsnip's lossy tool-output transforms. compression = " +
       "truncate oversized tool output using the chosen selector; selector = which " +
       "compression backend to use; dedup = collapse a repeated identical large " +
-      "result to a marker. minChars = compression threshold in characters " +
+      "result to a marker. probe = inject a unique sentinel token into the " +
+      "compaction summary prompt and record whether it survives into the summary " +
+      "(faithful-injection verification; off by default). minChars = compression " +
+      "threshold in characters " +
       "(default 4000; range 800-200000), which also sets how much is kept: " +
       "40% from the front, 30% from the back. Compression is lossy to the prompt " +
       "but lossless to the system: every dropped result is recoverable via " +
@@ -447,6 +457,12 @@ function configTool(ctx: Plugin.Context) {
           description: "Compression method used when compression is on (default extractive).",
         },
         dedup: { type: "boolean", description: "Enable/disable duplicate suppression." },
+        probe: {
+          type: "boolean",
+          description:
+            "Inject a unique sentinel token into the compaction summary prompt and " +
+            "record whether it survives into the summary (default off).",
+        },
         searchCompression: {
           type: "boolean",
           description:
@@ -477,6 +493,7 @@ function configTool(ctx: Plugin.Context) {
       if (typeof input.compression === "boolean") patch.compression = input.compression
       if (isSelectorName(input.selector)) patch.selector = input.selector
       if (typeof input.dedup === "boolean") patch.dedup = input.dedup
+      if (typeof input.probe === "boolean") patch.probe = input.probe
       if (typeof input.searchCompression === "boolean") patch.searchCompression = input.searchCompression
       const minChars = asMinChars(input.minChars)
       if (minChars !== undefined) patch.minChars = minChars
@@ -489,6 +506,7 @@ function configTool(ctx: Plugin.Context) {
         patch.compression !== undefined ||
         patch.selector !== undefined ||
         patch.dedup !== undefined ||
+        patch.probe !== undefined ||
         patch.searchCompression !== undefined ||
         patch.minChars !== undefined
       if (changed) {
@@ -639,7 +657,9 @@ function contextTool(ctx: Plugin.Context) {
       "ratio when available, else the install-measured 3.5 fallback — never " +
       "billing facts. " +
       "Counters only — no tool text is stored or returned. topN widens the " +
-      "per-tool lists (default 10, max 50).",
+      "per-tool lists (default 10, max 50). scope=session also includes a " +
+      "compaction probe: whether the compaction hook fired and what it pushed " +
+      "into the summarizer's system prompt (hook-observed, not model output).",
     input: {
       type: "object",
       properties: {
@@ -670,6 +690,7 @@ function contextTool(ctx: Plugin.Context) {
       }
       if (scope !== "current") {
         report.ledger = await loadAttribution(ctx.storage, toolContext.sessionID)
+        report.probe = await loadCompactionProbe(ctx.storage, toolContext.sessionID)
       }
       report.usage = (await loadTokenUsage(ctx.storage, toolContext.sessionID)) ?? null
 
@@ -690,8 +711,9 @@ function configCommand(ctx: Plugin.Context) {
   return {
     name: "parsnip",
     description:
-      "View or change parsnip compression/dedup/selector: `/parsnip compression off`, " +
+      "View or change parsnip compression/dedup/selector/probe: `/parsnip compression off`, " +
       "`/parsnip dedup on`, `/parsnip search on` (also compress web results; off by default), " +
+      "`/parsnip probe on` (inject a sentinel token to verify faithful compaction injection), " +
       "`/parsnip selector head-tail`, " +
       "`/parsnip threshold 1500` (or `default`), " +
       "`/parsnip reset [session]`. Add `session` to scope to this session only. " +
@@ -751,6 +773,7 @@ function configCommand(ctx: Plugin.Context) {
       const patch: ConfigOverride = {}
       if (field === "compression") patch.compression = enabled
       else if (field === "dedup") patch.dedup = enabled
+      else if (field === "probe") patch.probe = enabled
       else if (field === "search") patch.searchCompression = enabled
       else return
       await applyConfigPatch(ctx.storage, invocation.sessionID, patch, { scope })
@@ -845,16 +868,41 @@ const parsnip: Plugin.Plugin = {
       ctx.session.hook(
         "compaction",
         guarded("compaction", async (event: SessionCompaction) => {
+          const resultWasSet = event.result !== undefined
+          const systemPartsBefore = event.system.length
+          const config = await effectiveConfig(ctx.storage, event.sessionID)
+          const sentinel = config.probe ? makeSentinel() : undefined
           const continuity = await loadContinuity(ctx.storage, event.sessionID)
           const block = buildContinuityBlock({
             agent: event.agent,
             state: continuity,
             messages: event.messages,
+            sentinel,
           })
           if (block) event.system.push({ type: "text", text: block })
           // Deliberately do NOT set event.result — keep the main model as the
           // summarizer (self-compaction would need a second model, which cannot
           // reach the opencode-go provider).
+
+          // Record a deterministic probe of this firing so `parsnip_context`
+          // can answer "did the hook fire, and what did it push" without any
+          // dependence on model behaviour. Best-effort: a storage failure must
+          // never affect the summarizer request above.
+          try {
+            const previous = await loadCompactionProbe(ctx.storage, event.sessionID)
+            const probe = recordCompactionProbe(previous, {
+              injected: block !== "",
+              blockChars: block.length,
+              systemPartsBefore,
+              systemPartsAfter: event.system.length,
+              resultWasSet,
+              sentinel,
+              agent: event.agent,
+            })
+            await saveCompactionProbe(ctx.storage, event.sessionID, probe)
+          } catch {
+            // The probe is diagnostics only; the injection already happened.
+          }
         }),
       ),
     )
@@ -1152,6 +1200,25 @@ const parsnip: Plugin.Plugin = {
                 )
               } catch (error) {
                 console.error("[parsnip] session prune failed (ignored):", error)
+              }
+              continue
+            }
+            if (event.type === "session.compaction.ended") {
+              // Faithful-injection verdict: did the sentinel survive into the
+              // produced summary? Best-effort — a failure must never disturb the
+              // event stream.
+              try {
+                const sessionID = (event.data as { sessionID?: unknown } | undefined)?.sessionID
+                const summary = (event.data as { text?: unknown } | undefined)?.text
+                if (typeof sessionID === "string" && typeof summary === "string") {
+                  const probe = await loadCompactionProbe(ctx.storage, sessionID)
+                  const updated = recordCompactionVerdict(probe, summary)
+                  if (updated && updated !== probe) {
+                    await saveCompactionProbe(ctx.storage, sessionID, updated)
+                  }
+                }
+              } catch (error) {
+                console.error("[parsnip] compaction verdict failed (ignored):", error)
               }
               continue
             }

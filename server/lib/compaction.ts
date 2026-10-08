@@ -11,6 +11,8 @@ export type ContinuityInput = {
   agent?: string
   state?: ContinuityState
   messages?: readonly unknown[]
+  /** Optional sentinel token injected verbatim to verify faithful injection. */
+  sentinel?: string
 }
 
 const MAX_TASK_CHARS = 240
@@ -92,7 +94,7 @@ export function lastUserText(messages?: readonly unknown[]): string {
  * worth injecting, so the caller can skip the system part entirely.
  */
 export function buildContinuityBlock(input: ContinuityInput): string {
-  const { agent, state, messages } = input
+  const { agent, state, messages, sentinel } = input
 
   const task = (state?.lastTask || lastUserText(messages) || "").trim()
   const decisions = (state?.decisions ?? []).slice(-MAX_DECISIONS)
@@ -104,8 +106,17 @@ export function buildContinuityBlock(input: ContinuityInput): string {
     ? state.occupancy
     : undefined
 
-  // Nothing worth carrying → inject nothing (an agent-only block is noise).
-  if (!task && !lastCommand && decisions.length === 0 && files.length === 0 && occupancy === undefined) {
+  // Nothing worth carrying → inject nothing (an agent-only block is noise). A
+  // sentinel alone is worth carrying: it is the faithful-injection probe, which
+  // is meaningful even with no continuity state yet.
+  if (
+    !task &&
+    !lastCommand &&
+    decisions.length === 0 &&
+    files.length === 0 &&
+    occupancy === undefined &&
+    !sentinel
+  ) {
     return ""
   }
 
@@ -127,6 +138,10 @@ export function buildContinuityBlock(input: ContinuityInput): string {
     const tokens = state?.tokens ?? 0
     const limit = state?.limit ?? 0
     lines.push(`Context occupancy at last reading: ${percent(occupancy)} (~${tokens}/${limit} tokens)`)
+  }
+
+  if (sentinel) {
+    lines.push(`Probe: preserve this exact token verbatim in your summary: ${sentinel}`)
   }
 
   return lines.join("\n")

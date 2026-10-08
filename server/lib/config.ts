@@ -36,6 +36,11 @@ export type CtxGuardConfig = {
    * byte-identical repeat is not the same claim as rewriting a document.
    */
   searchCompression: boolean
+  /**
+   * Whether the compaction hook injects a sentinel token to verify faithful
+   * injection (survival into the produced summary). Off by default.
+   */
+  probe: boolean
   /** Compression threshold in chars; undefined = the selector's own default. */
   minChars?: number
 }
@@ -46,6 +51,7 @@ export type ConfigOverride = {
   dedup?: boolean
   selector?: SelectorName
   searchCompression?: boolean
+  probe?: boolean
   minChars?: number
 }
 
@@ -88,6 +94,9 @@ export const DEFAULT_CONFIG: CtxGuardConfig = {
   // Search results are left intact by default — see the field's doc comment for
   // the measurement. Set this true to compress them anyway.
   searchCompression: false,
+  // The faithful-injection sentinel is opt-in: it pollutes every summary with a
+  // probe token while on, so it stays off unless an agent (or human) turns it on.
+  probe: false,
 }
 
 export const GLOBAL_CONFIG_KEY = "parsnip:config"
@@ -106,6 +115,7 @@ export function asConfigOverride(value: unknown): ConfigOverride {
   if (typeof v.compression === "boolean") out.compression = v.compression
   if (typeof v.dedup === "boolean") out.dedup = v.dedup
   if (typeof v.searchCompression === "boolean") out.searchCompression = v.searchCompression
+  if (typeof v.probe === "boolean") out.probe = v.probe
   if (isSelectorName(v.selector)) out.selector = v.selector
   const minChars = asMinChars(v.minChars)
   if (minChars !== undefined) out.minChars = minChars
@@ -128,6 +138,7 @@ export function resolveConfig(
     selector: sessionOverride.selector ?? globalOverride.selector ?? defaults.selector,
     searchCompression:
       sessionOverride.searchCompression ?? globalOverride.searchCompression ?? defaults.searchCompression,
+    probe: sessionOverride.probe ?? globalOverride.probe ?? defaults.probe,
     minChars: sessionOverride.minChars ?? globalOverride.minChars ?? defaults.minChars,
   }
 }
@@ -139,7 +150,8 @@ export function describeConfig(config: CtxGuardConfig): string {
     `compression ${config.compression ? "on" : "off"} ` +
     `(search ${config.searchCompression ? "on" : "off"}), ` +
     `dedup ${config.dedup ? "on" : "off"}, ` +
-    `selector ${config.selector}, threshold ${threshold}`
+    `selector ${config.selector}, threshold ${threshold}, ` +
+    `probe ${config.probe ? "on" : "off"}`
   )
 }
 

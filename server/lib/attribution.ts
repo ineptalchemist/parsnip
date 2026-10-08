@@ -28,6 +28,8 @@
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { safeJson } from "./quality.ts"
+import type { CompactionProbe } from "./compaction-probe.ts"
+import { formatCompactionProbe } from "./compaction-probe.ts"
 import type { TokenUsageState } from "./storage.ts"
 
 // --- Bounds and labels -------------------------------------------------------
@@ -286,6 +288,8 @@ export type AttributionReport = {
   snapshot?: ContextSnapshot | null
   ledger?: AttributionLedger
   usage?: TokenUsageState | null
+  /** Compaction-hook probe; shown when present (session scope). */
+  probe?: CompactionProbe
 }
 
 export type ReportOptions = {
@@ -469,6 +473,9 @@ export function formatAttributionReport(
   }
 
   section(ledgerLines(report.ledger, topN))
+
+  const probeText = formatCompactionProbe(report.probe)
+  if (probeText) section([probeText])
 
   if (report.usage === undefined) {
     // not requested — omit
