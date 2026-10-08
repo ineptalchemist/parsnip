@@ -1,0 +1,264 @@
+import { test } from "node:test"
+import assert from "node:assert/strict"
+import {
+  ATTRIBUTION_TOOL_LIMIT,
+  SNAPSHOT_TOOL_LIMIT,
+  UNATTRIBUTED_TOOL,
+  asAttributionLedger,
+  buildSnapshot,
+  cleanToolName,
+  emptyLedger,
+  estimatedTokensOf,
+  formatAttributionReport,
+  recordResult,
+} from "./attribution.ts"
+
+// --- ledger ------------------------------------------------------------------
+
+test("recordResult: accumulates per-tool counters and keeps tools independent", () => {
+  let ledger = emptyLedger(1)
+  ledger = recordResult(ledger, { tool: "shell", observedChars: 9000, retainedChars: 3000, compressed: true }, 2)
+  ledger = recordResult(ledger, { tool: "read", observedChars: 5000, retainedChars: 5000 }, 3)
+  ledger = recordResult(ledger, { tool: "shell", observedChars: 1000, retainedChars: 1000 }, 4)
+
+  assert.equal(ledger.tools.shell.calls, 2)
+  assert.equal(ledger.tools.shell.nonEmptyResults, 2)
+  assert.equal(ledger.tools.shell.observedChars, 10000)
+  assert.equal(ledger.tools.shell.retainedChars, 4000)
+  assert.equal(ledger.tools.shell.omittedChars, 6000)
+  assert.equal(ledger.tools.shell.compressionCount, 1)
+  assert.equal(ledger.tools.read.calls, 1)
+  assert.equal(ledger.tools.read.observedChars, 5000)
+  assert.equal(ledger.tools.read.omittedChars, 0)
+  assert.equal(ledger.updatedAt, 4)
+  assert.equal(ledger.droppedTools, 0)
+})
+
+test("recordResult: counts compression and dedup events, clamps omitted at zero", () => {
+  let ledger = emptyLedger()
+  ledger = recordResult(ledger, {
+    tool: "shell",
+    observedChars: 100,
+    retainedChars: 120,
+    compressed: true,
+    deduped: true,
+  })
+  assert.equal(ledger.tools.shell.omittedChars, 0)
+  assert.equal(ledger.tools.shell.retainedChars, 120)
+  assert.equal(ledger.tools.shell.compressionCount, 1)
+  assert.equal(ledger.tools.shell.dedupCount, 1)
+})
+
+test("recordResult: blank tool names land in the (unknown) bucket", () => {
+  const ledger = recordResult(emptyLedger(), { tool: "   ", observedChars: 4, retainedChars: 4 })
+  assert.deepEqual(Object.keys(ledger.tools), ["(unknown)"])
+  assert.equal(ledger.tools["(unknown)"].calls, 1)
+})
+
+test("recordResult: evicts the smallest tool past the bound and counts the eviction", () => {
+  let ledger = emptyLedger()
+  for (let i = 1; i <= ATTRIBUTION_TOOL_LIMIT; i += 1) {
+    ledger = recordResult(ledger, { tool: `tool-${i}`, observedChars: i, retainedChars: i })
+  }
+  assert.equal(Object.keys(ledger.tools).length, ATTRIBUTION_TOOL_LIMIT)
+
+  ledger = recordResult(ledger, { tool: "hot", observedChars: 1_000_000, retainedChars: 0 })
+  assert.equal(Object.keys(ledger.tools).length, ATTRIBUTION_TOOL_LIMIT)
+  assert.equal(ledger.tools["tool-1"], undefined, "the smallest row is evicted")
+  assert.ok(ledger.tools.hot)
+  assert.equal(ledger.droppedTools, 1)
+})
+
+test("asAttributionLedger: rejects junk and narrows a partial record", () => {
+  const rejected = asAttributionLedger(undefined)
+  assert.deepEqual(rejected.tools, {})
+  assert.equal(rejected.droppedTools, 0)
+  assert.deepEqual(asAttributionLedger(null).tools, {})
+  assert.deepEqual(asAttributionLedger([1, 2]).tools, {})
+  assert.deepEqual(asAttributionLedger("nope").tools, {})
+
+  const ledger = asAttributionLedger({
+    tools: {
+      shell: { calls: "x", observedChars: -5, retainedChars: 3.9, bogus: 1 },
+      bad: "nope",
+      read: null,
+    },
+    droppedTools: "y",
+    updatedAt: 123,
+  })
+  assert.deepEqual(ledger.tools.shell, {
+    calls: 0,
+    nonEmptyResults: 0,
+    observedChars: 0,
+    retainedChars: 3,
+    omittedChars: 0,
+    compressionCount: 0,
+    dedupCount: 0,
+  })
+  assert.deepEqual(Object.keys(ledger.tools), ["shell"])
+  assert.equal(ledger.droppedTools, 0)
+  assert.equal(ledger.updatedAt, 123)
+})
+
+test("asAttributionLedger: re-enforces the tool bound on load", () => {
+  const tools: Record<string, unknown> = {}
+  for (let i = 1; i <= ATTRIBUTION_TOOL_LIMIT + 10; i += 1) {
+    tools[`t${i}`] = { calls: 1, observedChars: i }
+  }
+  const ledger = asAttributionLedger({ tools })
+  assert.equal(Object.keys(ledger.tools).length, ATTRIBUTION_TOOL_LIMIT)
+  assert.equal(ledger.droppedTools, 10)
+  assert.equal(ledger.tools.t1, undefined)
+  assert.ok(ledger.tools[`t${ATTRIBUTION_TOOL_LIMIT + 10}`])
+})
+
+// --- snapshot ----------------------------------------------------------------
+
+test("buildSnapshot: merges duplicate tool rows, sorts by chars, keeps the total exact", () => {
+  const snapshot = buildSnapshot(
+    {
+      systemChars: 40000,
+      userChars: 4000,
+      assistantChars: 8000,
+      reasoningChars: 0,
+      toolResults: [
+        { tool: "shell", chars: 8000 },
+        { tool: "read", chars: 1000 },
+        { tool: "shell", chars: 1000 },
+        { tool: UNATTRIBUTED_TOOL, chars: 500 },
+        { tool: "empty", chars: 0 },
+      ],
+      catalogueChars: 2000,
+    },
+    7,
+  )
+  assert.deepEqual(snapshot.toolResults, [
+    { tool: "shell", chars: 9000 },
+    { tool: "read", chars: 1000 },
+    { tool: UNATTRIBUTED_TOOL, chars: 500 },
+  ])
+  assert.equal(snapshot.toolTotalChars, 10500)
+  assert.equal(snapshot.totalChars, 40000 + 4000 + 8000 + 0 + 10500 + 2000)
+  assert.equal(snapshot.toolOverflowCount, 0)
+  assert.equal(snapshot.toolOverflowChars, 0)
+  assert.equal(snapshot.updatedAt, 7)
+})
+
+test("buildSnapshot: folds rows past the snapshot bound into the overflow figure", () => {
+  const entries = Array.from({ length: SNAPSHOT_TOOL_LIMIT + 3 }, (_, i) => ({
+    tool: `tool-${i + 1}`,
+    chars: i + 1,
+  }))
+  const snapshot = buildSnapshot({
+    systemChars: 0,
+    userChars: 0,
+    assistantChars: 0,
+    reasoningChars: 0,
+    toolResults: entries,
+    catalogueChars: 0,
+  })
+  assert.equal(snapshot.toolResults.length, SNAPSHOT_TOOL_LIMIT)
+  assert.equal(snapshot.toolOverflowCount, 3)
+  assert.equal(snapshot.toolOverflowChars, 1 + 2 + 3)
+  const total = entries.reduce((sum, entry) => sum + entry.chars, 0)
+  assert.equal(snapshot.toolTotalChars, total)
+  assert.equal(snapshot.totalChars, total)
+})
+
+// --- formatter ---------------------------------------------------------------
+
+function sampleLedger() {
+  let ledger = emptyLedger(1)
+  ledger = recordResult(ledger, { tool: "shell", observedChars: 9000, retainedChars: 3000, compressed: true, deduped: false }, 2)
+  ledger = recordResult(ledger, { tool: "shell", observedChars: 0, retainedChars: 0, compressed: true }, 3)
+  ledger = recordResult(ledger, { tool: "shell", observedChars: 0, retainedChars: 0 }, 4)
+  ledger = recordResult(ledger, { tool: "read", observedChars: 5000, retainedChars: 5000 }, 5)
+  return ledger
+}
+
+test("formatAttributionReport: renders all three blocks with the honesty labels", () => {
+  const snapshot = buildSnapshot(
+    {
+      systemChars: 40000,
+      userChars: 4000,
+      assistantChars: 8000,
+      reasoningChars: 0,
+      toolResults: [
+        { tool: "shell", chars: 8000 },
+        { tool: "read", chars: 2000 },
+        { tool: UNATTRIBUTED_TOOL, chars: 500 },
+      ],
+      catalogueChars: 2000,
+    },
+    1,
+  )
+  const out = formatAttributionReport({
+    snapshot,
+    ledger: sampleLedger(),
+    usage: {
+      input: 156297,
+      output: 31389,
+      reasoning: 28405,
+      cacheRead: 1808128,
+      cacheWrite: 12000,
+      cost: 0.043687,
+      updatedAt: 1,
+    },
+  })
+
+  assert.match(out, /exact chars \(observed\)/)
+  assert.match(out, /Current request \(last outgoing context\)/)
+  assert.match(out, /~16,125 tok/)
+  assert.match(out, /tool results\s+~2,625 tok\s+16\.3%/)
+  assert.match(out, /\(unattributed\)\s+~125 tok/)
+  assert.match(out, /Session tool ledger \(observed chars, exact/)
+  assert.match(out, /shell\s+3\s+9,000\s+3,000\s+6,000\s+2\s+0\s+64\.3%/)
+  assert.match(out, /cache hit rate 91\.5%/)
+  assert.match(out, /cost \$0\.043687/)
+  assert.match(out, /authoritative/)
+})
+
+test("formatAttributionReport: empty states are explicit, not silently blank", () => {
+  const out = formatAttributionReport({ snapshot: null, ledger: emptyLedger(), usage: null })
+  assert.match(out, /no snapshot captured yet/)
+  assert.match(out, /no completed tool calls observed yet/)
+  assert.match(out, /no session\.usage\.updated recorded for this session yet/)
+})
+
+test("formatAttributionReport: sections not requested are omitted entirely", () => {
+  const out = formatAttributionReport({ ledger: sampleLedger() })
+  assert.ok(!out.includes("Current request"))
+  assert.ok(!out.includes("Provider totals"))
+  assert.match(out, /Session tool ledger/)
+})
+
+test("formatAttributionReport: respects topN and reports the remainder", () => {
+  let ledger = emptyLedger()
+  for (let i = 1; i <= 12; i += 1) {
+    ledger = recordResult(ledger, { tool: `tool-${i}`, observedChars: i * 100, retainedChars: 0 })
+  }
+  const out = formatAttributionReport({ ledger }, { topN: 3 })
+  const rows = out.split("\n").filter((line) => /^ {2}tool-\d+\s/.test(line))
+  assert.equal(rows.length, 3)
+  assert.match(out, /9 more tool\(s\)/)
+})
+
+test("formatAttributionReport: reports evictions honestly", () => {
+  const out = formatAttributionReport({ ledger: { tools: {}, droppedTools: 3, updatedAt: 0 } })
+  assert.match(out, /3 tool row\(s\) evicted by the retention bound/)
+})
+
+// --- helpers -----------------------------------------------------------------
+
+test("estimatedTokensOf: ceil(chars/4), zero-safe, junk-safe", () => {
+  assert.equal(estimatedTokensOf(0), 0)
+  assert.equal(estimatedTokensOf(1), 1)
+  assert.equal(estimatedTokensOf(40000), 10000)
+  assert.equal(estimatedTokensOf(-5), 0)
+})
+
+test("cleanToolName: trims, and blanks land in (unknown)", () => {
+  assert.equal(cleanToolName(" shell "), "shell")
+  assert.equal(cleanToolName(""), "(unknown)")
+  assert.equal(cleanToolName(undefined), "(unknown)")
+})
