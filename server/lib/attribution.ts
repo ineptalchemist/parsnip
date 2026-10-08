@@ -19,10 +19,12 @@
  *  - Provider usage (`session.usage.updated`, `TokenUsageState`) is the only
  *    authoritative token data and is never mixed into the estimates.
  *
- * Counters only — no tool text is stored anywhere here. Pure and
- * dependency-free apart from a type-only import, so the whole surface is
+ * Counters only — no tool text is stored anywhere here. The logic is pure and
+ * carries no runtime dependency: the storage helpers take the domain as a
+ * parameter and every import is type-only, so the whole surface is
  * unit-testable under `node --test`.
  */
+import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { TokenUsageState } from "./storage.ts"
 
 // --- Bounds and labels -------------------------------------------------------
@@ -453,4 +455,91 @@ export function formatAttributionReport(
 
   if (lines.length === 1) lines.push("", "No attribution data captured yet.")
   return lines.join("\n")
+}
+
+// --- Storage (session-scoped) ------------------------------------------------
+
+/** Stable storage key for a session's per-tool attribution ledger. */
+export const attributionKey = (sessionID: string): string => `session:${sessionID}:attribution`
+
+/** Load a session's ledger; absent or malformed records narrow to empty. */
+export async function loadAttribution(
+  storage: StorageDomain,
+  sessionID: string,
+): Promise<AttributionLedger> {
+  return asAttributionLedger(await storage.get(attributionKey(sessionID)))
+}
+
+export async function saveAttribution(
+  storage: StorageDomain,
+  sessionID: string,
+  ledger: AttributionLedger,
+): Promise<void> {
+  await storage.set(
+    attributionKey(sessionID),
+    ledger as unknown as Parameters<StorageDomain["set"]>[1],
+  )
+}
+
+// --- Capture helpers ---------------------------------------------------------
+//
+// `recordAttribution` is called from `execute.after` for every completed tool
+// call. Load -> fold -> save is not atomic and hooks for one session can run
+// concurrently (parallel tool calls land together), so writes serialize
+// through a per-session promise chain instead of racing.
+
+/**
+ * Serialize async read-modify-write work per key: one promise chain per key,
+ * so concurrent tool hooks for the same session cannot clobber each other's
+ * ledger updates. The chain entry is removed once it drains, and a rejected
+ * task reaches its caller without breaking the chain.
+ */
+export function enqueue<T>(
+  chains: Map<string, Promise<void>>,
+  key: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  const previous = chains.get(key) ?? Promise.resolve()
+  const run = previous.then(work)
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  chains.set(key, tail)
+  void tail.then(() => {
+    if (chains.get(key) === tail) chains.delete(key)
+  })
+  return run
+}
+
+/** One completed call as the capture site sees it. */
+export type CaptureInput = {
+  sessionID: string
+  tool: string
+  observedChars: number
+  retainedChars: number
+  compressed?: boolean
+  deduped?: boolean
+}
+
+/**
+ * Fold one completed tool call into a session's ledger. Counters only — no
+ * tool text. Failures stay with the caller (the hook logs and swallows them).
+ */
+export async function recordAttribution(
+  storage: StorageDomain,
+  chains: Map<string, Promise<void>>,
+  input: CaptureInput,
+): Promise<void> {
+  await enqueue(chains, input.sessionID, async () => {
+    const ledger = await loadAttribution(storage, input.sessionID)
+    const next = recordResult(ledger, {
+      tool: input.tool,
+      observedChars: input.observedChars,
+      retainedChars: input.retainedChars,
+      compressed: input.compressed,
+      deduped: input.deduped,
+    })
+    await saveAttribution(storage, input.sessionID, next)
+  })
 }

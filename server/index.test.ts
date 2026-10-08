@@ -433,6 +433,84 @@ test("execute.after: dedup savings are recorded with compression off", async () 
   assert.equal(savings.charsDeduped, 6000 - DEDUP_MARKER.length)
 })
 
+// --- attribution capture -----------------------------------------------------
+
+test("execute.after: records attribution for non-target tools too", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const event = toolEvent({
+    tool: "read",
+    result: { content: [{ type: "text", text: "r".repeat(4000) }] },
+  })
+  await h.hooks["execute.after"](event)
+
+  const ledger = h.store.get("session:ses_test:attribution") as AnyRecord
+  assert.ok(ledger, "no attribution ledger written")
+  assert.deepEqual(ledger.tools.read, {
+    calls: 1,
+    nonEmptyResults: 1,
+    observedChars: 4000,
+    retainedChars: 4000,
+    omittedChars: 0,
+    compressionCount: 0,
+    dedupCount: 0,
+  })
+  assert.ok(!ledger.tools.shell, "only the observed tool gets a row")
+})
+
+test("execute.after: attribution captures observed at entry and retained after compression", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: true, selector: "head-tail" })
+
+  const event = toolEvent()
+  await h.hooks["execute.after"](event)
+
+  const retained = textLengthOf(event.result)
+  const ledger = h.store.get("session:ses_test:attribution") as AnyRecord
+  const shell = ledger.tools.shell
+  assert.equal(shell.calls, 1)
+  assert.equal(shell.observedChars, 6000)
+  assert.ok(retained < 6000, "head-tail must shorten the result")
+  assert.equal(shell.retainedChars, retained, "retained equals what entered the transcript")
+  assert.equal(shell.omittedChars, 6000 - retained)
+  assert.equal(shell.compressionCount, 1)
+  assert.equal(shell.dedupCount, 0)
+})
+
+test("execute.after: attribution counts dedup replacements", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("parsnip:config", { compression: false })
+
+  await h.hooks["execute.after"](toolEvent())
+  await h.hooks["execute.after"](toolEvent())
+
+  const ledger = h.store.get("session:ses_test:attribution") as AnyRecord
+  const shell = ledger.tools.shell
+  assert.equal(shell.calls, 2)
+  assert.equal(shell.observedChars, 12000)
+  assert.equal(shell.retainedChars, 6000 + DEDUP_MARKER.length)
+  assert.equal(shell.omittedChars, 6000 - DEDUP_MARKER.length)
+  assert.equal(shell.dedupCount, 1)
+  assert.equal(shell.compressionCount, 0)
+})
+
+test("execute.after: the report tool never counts itself", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const event = toolEvent({
+    tool: "parsnip_context",
+    result: { content: [{ type: "text", text: "report text" }] },
+  })
+  await h.hooks["execute.after"](event)
+
+  assert.equal(h.store.get("session:ses_test:attribution"), undefined)
+  assert.equal((event.result.content as AnyRecord[])[0].text, "report text")
+})
+
 test("execute.after: a re-run with changed output is NOT suppressed (content-hash dedup)", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)

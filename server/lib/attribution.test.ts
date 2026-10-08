@@ -1,16 +1,22 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import {
   ATTRIBUTION_TOOL_LIMIT,
   SNAPSHOT_TOOL_LIMIT,
   UNATTRIBUTED_TOOL,
   asAttributionLedger,
+  attributionKey,
   buildSnapshot,
   cleanToolName,
   emptyLedger,
+  enqueue,
   estimatedTokensOf,
   formatAttributionReport,
+  loadAttribution,
+  recordAttribution,
   recordResult,
+  saveAttribution,
 } from "./attribution.ts"
 
 // --- ledger ------------------------------------------------------------------
@@ -246,6 +252,102 @@ test("formatAttributionReport: respects topN and reports the remainder", () => {
 test("formatAttributionReport: reports evictions honestly", () => {
   const out = formatAttributionReport({ ledger: { tools: {}, droppedTools: 3, updatedAt: 0 } })
   assert.match(out, /3 tool row\(s\) evicted by the retention bound/)
+})
+
+// --- storage helpers ---------------------------------------------------------
+
+test("attributionKey / loadAttribution / saveAttribution: round-trip, junk-safe", async () => {
+  const store = new Map<string, unknown>()
+  const storage = {
+    get: async (key: string) => store.get(key),
+    set: async (key: string, value: unknown) => void store.set(key, value),
+  } as unknown as StorageDomain
+
+  assert.equal(attributionKey("ses_1"), "session:ses_1:attribution")
+
+  const empty = await loadAttribution(storage, "ses_1")
+  assert.deepEqual(empty.tools, {})
+  assert.equal(empty.droppedTools, 0)
+
+  const folded = recordResult(empty, { tool: "shell", observedChars: 10, retainedChars: 4 })
+  await saveAttribution(storage, "ses_1", folded)
+  const loaded = await loadAttribution(storage, "ses_1")
+  assert.equal(loaded.tools.shell.calls, 1)
+  assert.equal(loaded.tools.shell.observedChars, 10)
+
+  // Malformed stored values narrow to an empty ledger instead of throwing.
+  await storage.set(attributionKey("ses_2"), "junk")
+  assert.deepEqual((await loadAttribution(storage, "ses_2")).tools, {})
+})
+
+// --- capture helpers ---------------------------------------------------------
+
+test("enqueue: serializes per key, survives a rejection, and cleans up", async () => {
+  const chains = new Map<string, Promise<void>>()
+  const order: string[] = []
+  const task = (label: string, ms: number) => async () => {
+    await new Promise((resolve) => setTimeout(resolve, ms))
+    order.push(label)
+  }
+
+  await Promise.all([enqueue(chains, "ses_1", task("a", 8)), enqueue(chains, "ses_1", task("b", 1))])
+  assert.deepEqual(order, ["a", "b"], "work runs in chain order, not duration order")
+
+  const failed = enqueue(chains, "ses_1", async () => {
+    throw new Error("boom")
+  })
+  await assert.rejects(failed, /boom/)
+  await enqueue(chains, "ses_1", async () => void order.push("c"))
+  assert.equal(order.at(-1), "c", "a rejected task does not break the chain")
+
+  await Promise.all([
+    enqueue(chains, "ses_2", task("slow", 8)),
+    enqueue(chains, "ses_3", task("fast", 1)),
+  ])
+  assert.ok(
+    order.indexOf("fast") < order.indexOf("slow"),
+    "different keys do not serialize against each other",
+  )
+
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(chains.size, 0, "drained chains are removed")
+})
+
+test("recordAttribution: concurrent folds for one session both land", async () => {
+  const store = new Map<string, unknown>()
+  const storage = {
+    get: async (key: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      return store.get(key)
+    },
+    set: async (key: string, value: unknown) => {
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      void store.set(key, value)
+    },
+  } as unknown as StorageDomain
+  const chains = new Map<string, Promise<void>>()
+
+  await Promise.all([
+    recordAttribution(storage, chains, {
+      sessionID: "ses_1",
+      tool: "read",
+      observedChars: 10,
+      retainedChars: 10,
+    }),
+    recordAttribution(storage, chains, {
+      sessionID: "ses_1",
+      tool: "shell",
+      observedChars: 20,
+      retainedChars: 5,
+      compressed: true,
+    }),
+  ])
+
+  const ledger = await loadAttribution(storage, "ses_1")
+  assert.equal(ledger.tools.read.calls, 1)
+  assert.equal(ledger.tools.shell.calls, 1)
+  assert.equal(ledger.tools.shell.compressionCount, 1)
+  assert.equal(ledger.tools.shell.omittedChars, 15)
 })
 
 // --- helpers -----------------------------------------------------------------

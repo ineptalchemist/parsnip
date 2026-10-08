@@ -29,6 +29,7 @@ import type { SessionCompaction, SessionContext } from "@opencode/plugin/promise
 import type { ToolEditor } from "@opencode/plugin/promise/tool"
 import type { CommandEditor } from "@opencode/plugin/promise/command"
 import type { Model } from "@opencode/schema/model"
+import { recordAttribution } from "./lib/attribution.ts"
 import { buildContinuityBlock, promptText as promptInputText, truncate } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
 import {
@@ -101,6 +102,14 @@ import { SELECTOR_NAMES, isSelectorName, selectWith } from "./lib/selectors.ts"
 const DEFAULT_CONTEXT_LIMIT = 200_000
 
 /**
+ * The report tool's name (`parsnip_context`, registered with its own step).
+ * Reserved here because `execute.after` must exclude the report from the very
+ * ledger it renders — a report that counts itself inflates every number it
+ * shows.
+ */
+const CONTEXT_TOOL_NAME = "parsnip_context"
+
+/**
  * Phase 3 state, created per `setup()` call — i.e. rebuilt on every hot reload,
  * and isolated between plugin instances. Nothing durable lives here: usage and
  * reports all go to `ctx.storage`.
@@ -112,12 +121,14 @@ type StructureState = {
   statusCache?: { at: number; statuses: Map<string, string> }
   /** Last session whose usage was read, so repeat tool calls skip storage. */
   usageCache?: { sessionID: string; usage: ToolUsage }
+  /** One promise chain per session, serializing attribution read-modify-write. */
+  attributionChains: Map<string, Promise<void>>
 }
 
 const STATUS_TTL_MS = 5_000
 
 function createStructureState(): StructureState {
-  return { catalog: { servers: [], skills: [] } }
+  return { catalog: { servers: [], skills: [] }, attributionChains: new Map() }
 }
 
 function modelKey(providerID: string, modelID: string): string {
@@ -860,109 +871,138 @@ const parsnip: Plugin.Plugin = {
       ctx.tool.hook(
         "execute.after",
         guarded("execute.after", async (event) => {
-          if (!isTargetTool(event.tool)) return
           if (event.status !== "completed") return // never touch errors
+          if (event.tool === CONTEXT_TOOL_NAME) return // the report never counts itself
 
-          const text = textLengthOf(event.result)
-          if (text <= 0) return // structured output only → nothing to compress
+          // Attribution observes every completed call — including non-target
+          // tools like `read` — so the sizes are captured before any transform
+          // and recorded in the `finally`, which every early exit passes
+          // through. `observed` is the size at entry (post native limits);
+          // `retained` is whatever actually enters the transcript.
+          const observed = textLengthOf(event.result)
+          let deduped = false
+          let shortened = false
+          try {
+            if (!isTargetTool(event.tool)) return
+            if (observed <= 0) return // structured output only → nothing to compress
 
-          // Effective on/off comes from ctx.storage (session override -> global
-          // override -> default), read fresh so a toggle takes effect next call.
-          const config = await effectiveConfig(ctx.storage, event.sessionID)
+            const text = observed
 
-          // Dedup first: a repeated large result collapses to a marker, and is
-          // not re-added to the history (it is already there).
-          if (config.dedup && text > DEDUP_MIN_CHARS) {
-            const signature = dedupSignature(event.tool, event.input, resultTextOf(event.result))
-            const recent = await loadRecentSignatures(ctx.storage, event.sessionID)
-            if (recent.includes(signature)) {
-              event.result = replaceResultText(event.result, DEDUP_MARKER)
-              // Measure: the full text would have been committed otherwise.
-              const saved = Math.max(0, text - DEDUP_MARKER.length)
-              if (saved > 0) {
-                await saveSavings(
-                  ctx.storage,
-                  event.sessionID,
-                  addDedup(await loadSavings(ctx.storage, event.sessionID), text),
-                )
-                console.error(`[parsnip] savings session=${event.sessionID} event=dedup chars=${saved}`)
-              }
-              return
-            }
-            await saveRecentSignatures(ctx.storage, event.sessionID, [...recent, signature])
-          }
+            // Effective on/off comes from ctx.storage (session override -> global
+            // override -> default), read fresh so a toggle takes effect next call.
+            const config = await effectiveConfig(ctx.storage, event.sessionID)
 
-          // Then compress with the configured selector. Only the result that is
-          // about to be committed is rewritten — never the transcript.
-          //
-          // Search / retrieval results are excluded unless `searchCompression` is
-          // on: measured over 28 recorded search documents, every selector breaks
-          // the `Title:`/`URL:`/`Highlights:` records apart, keeping a title and
-          // its excerpt together in only 6 of 71 cases. Dedup above is
-          // unaffected — collapsing a byte-identical repeat is a different claim.
-          const compressionTargets = config.searchCompression ? TARGET_TOOLS : SHELL_ONLY_TARGETS
-          if (config.compression && isTargetTool(event.tool, compressionTargets)) {
-            const selector = config.selector
-            const threshold = config.minChars
-            const compressed = compressResult(event.result, (part) =>
-              selectWith(selector, part, threshold),
-            )
-            if (compressed !== event.result) {
-              // Capture the pre-compression text for the fidelity diff, then
-              // mutate first (the primary job) and measure best-effort: a
-              // storage failure must never undo an already-applied compression.
-              const beforeText = resultTextOf(event.result)
-              const afterText = resultTextOf(compressed)
-              event.result = compressed
-              const compressedLen = textLengthOf(compressed)
-              const omitted = text - compressedLen
-              if (omitted > 0) {
-                await saveSavings(
-                  ctx.storage,
-                  event.sessionID,
-                  addCompression(
-                    await loadSavings(ctx.storage, event.sessionID),
-                    selector,
-                    text,
-                    compressedLen,
-                  ),
-                )
-                // Fidelity signal: fingerprint what this method dropped, so an
-                // external eval can attribute context loss to a selector.
-                const fidelity = compressionEvent({
-                  selector,
-                  tool: event.tool,
-                  input: beforeText,
-                  output: afterText,
-                })
-                const recent = await loadRecentCompressions(ctx.storage, event.sessionID)
-                await saveRecentCompressions(ctx.storage, event.sessionID, [...recent, fidelity])
-
-                // Recall cache: keep the FULL dropped text retrievable, and hang a
-                // recall note off the compressed result so the agent can get it back.
-                // This is the backstop for the fact that no selector can know a
-                // priori what matters (see the salience eval).
-                const recall = await loadRecall(ctx.storage, event.sessionID)
-                const recallId = `recall-${recall.seq + 1}`
-                const entry: RecallEntry = {
-                  id: recallId,
-                  tool: event.tool,
-                  at: fidelity.at,
-                  inputChars: beforeText.length,
-                  inputHash: fidelity.inputHash,
-                  sample: fidelity.omittedSample,
-                  text: beforeText,
+            // Dedup first: a repeated large result collapses to a marker, and is
+            // not re-added to the history (it is already there).
+            if (config.dedup && text > DEDUP_MIN_CHARS) {
+              const signature = dedupSignature(event.tool, event.input, resultTextOf(event.result))
+              const recent = await loadRecentSignatures(ctx.storage, event.sessionID)
+              if (recent.includes(signature)) {
+                event.result = replaceResultText(event.result, DEDUP_MARKER)
+                deduped = true
+                // Measure: the full text would have been committed otherwise.
+                const saved = Math.max(0, text - DEDUP_MARKER.length)
+                if (saved > 0) {
+                  await saveSavings(
+                    ctx.storage,
+                    event.sessionID,
+                    addDedup(await loadSavings(ctx.storage, event.sessionID), text),
+                  )
+                  console.error(`[parsnip] savings session=${event.sessionID} event=dedup chars=${saved}`)
                 }
-                await saveRecall(ctx.storage, event.sessionID, {
-                  seq: recall.seq + 1,
-                  entries: [...recall.entries, entry],
-                })
-                event.result = appendResultText(event.result, `\n${recallNote(recallId, entry.sample)}`)
-
-                console.error(
-                  `[parsnip] savings session=${event.sessionID} selector=${selector} event=compress chars=${omitted} recall=${recallId}`,
-                )
+                return
               }
+              await saveRecentSignatures(ctx.storage, event.sessionID, [...recent, signature])
+            }
+
+            // Then compress with the configured selector. Only the result that is
+            // about to be committed is rewritten — never the transcript.
+            //
+            // Search / retrieval results are excluded unless `searchCompression` is
+            // on: measured over 28 recorded search documents, every selector breaks
+            // the `Title:`/`URL:`/`Highlights:` records apart, keeping a title and
+            // its excerpt together in only 6 of 71 cases. Dedup above is
+            // unaffected — collapsing a byte-identical repeat is a different claim.
+            const compressionTargets = config.searchCompression ? TARGET_TOOLS : SHELL_ONLY_TARGETS
+            if (config.compression && isTargetTool(event.tool, compressionTargets)) {
+              const selector = config.selector
+              const threshold = config.minChars
+              const compressed = compressResult(event.result, (part) =>
+                selectWith(selector, part, threshold),
+              )
+              if (compressed !== event.result) {
+                // Capture the pre-compression text for the fidelity diff, then
+                // mutate first (the primary job) and measure best-effort: a
+                // storage failure must never undo an already-applied compression.
+                const beforeText = resultTextOf(event.result)
+                const afterText = resultTextOf(compressed)
+                event.result = compressed
+                const compressedLen = textLengthOf(compressed)
+                const omitted = text - compressedLen
+                if (omitted > 0) {
+                  shortened = true
+                  await saveSavings(
+                    ctx.storage,
+                    event.sessionID,
+                    addCompression(
+                      await loadSavings(ctx.storage, event.sessionID),
+                      selector,
+                      text,
+                      compressedLen,
+                    ),
+                  )
+                  // Fidelity signal: fingerprint what this method dropped, so an
+                  // external eval can attribute context loss to a selector.
+                  const fidelity = compressionEvent({
+                    selector,
+                    tool: event.tool,
+                    input: beforeText,
+                    output: afterText,
+                  })
+                  const recent = await loadRecentCompressions(ctx.storage, event.sessionID)
+                  await saveRecentCompressions(ctx.storage, event.sessionID, [...recent, fidelity])
+
+                  // Recall cache: keep the FULL dropped text retrievable, and hang a
+                  // recall note off the compressed result so the agent can get it back.
+                  // This is the backstop for the fact that no selector can know a
+                  // priori what matters (see the salience eval).
+                  const recall = await loadRecall(ctx.storage, event.sessionID)
+                  const recallId = `recall-${recall.seq + 1}`
+                  const entry: RecallEntry = {
+                    id: recallId,
+                    tool: event.tool,
+                    at: fidelity.at,
+                    inputChars: beforeText.length,
+                    inputHash: fidelity.inputHash,
+                    sample: fidelity.omittedSample,
+                    text: beforeText,
+                  }
+                  await saveRecall(ctx.storage, event.sessionID, {
+                    seq: recall.seq + 1,
+                    entries: [...recall.entries, entry],
+                  })
+                  event.result = appendResultText(event.result, `\n${recallNote(recallId, entry.sample)}`)
+
+                  console.error(
+                    `[parsnip] savings session=${event.sessionID} selector=${selector} event=compress chars=${omitted} recall=${recallId}`,
+                  )
+                }
+              }
+            }
+          } finally {
+            // Best-effort, and self-serialized per session so parallel calls
+            // cannot clobber each other. A failure here must never fail the hook.
+            try {
+              await recordAttribution(ctx.storage, state.attributionChains, {
+                sessionID: event.sessionID,
+                tool: event.tool,
+                observedChars: observed,
+                retainedChars: textLengthOf(event.result),
+                deduped,
+                compressed: shortened,
+              })
+            } catch (error) {
+              console.error("[parsnip] attribution record failed (ignored):", error)
             }
           }
         }),
