@@ -3,22 +3,32 @@ import assert from "node:assert/strict"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import {
   ATTRIBUTION_TOOL_LIMIT,
+  CALIBRATION_MIN_PAIRS,
   SNAPSHOT_TOOL_LIMIT,
   UNATTRIBUTED_TOOL,
   asAttributionLedger,
+  asCalibration,
   asContextSnapshot,
   attributionKey,
   buildSnapshot,
+  calibrationKey,
+  calibrationRatio,
+  calibrationSummary,
   cleanToolName,
+  emptyCalibration,
   emptyLedger,
   enqueue,
   estimatedTokensOf,
   formatAttributionReport,
   loadAttribution,
+  loadCalibration,
   loadSnapshot,
+  noteSnapshot,
+  noteUsage,
   recordAttribution,
   recordResult,
   saveAttribution,
+  saveCalibration,
   saveSnapshot,
   snapshotInputFromContext,
   snapshotKey,
@@ -218,10 +228,11 @@ test("formatAttributionReport: renders all three blocks with the honesty labels"
   })
 
   assert.match(out, /exact chars \(observed\)/)
+  assert.match(out, /uncalibrated — install-measured fallback/)
   assert.match(out, /Current request \(last outgoing context\)/)
-  assert.match(out, /~16,125 tok/)
-  assert.match(out, /tool results\s+~2,625 tok\s+16\.3%/)
-  assert.match(out, /\(unattributed\)\s+~125 tok/)
+  assert.match(out, /~18,429 tok/)
+  assert.match(out, /tool results\s+~3,000 tok\s+16\.3%/)
+  assert.match(out, /\(unattributed\)\s+~143 tok/)
   assert.match(out, /Session tool ledger \(observed chars, exact/)
   assert.match(out, /shell\s+3\s+9,000\s+3,000\s+6,000\s+2\s+0\s+64\.3%/)
   assert.match(out, /cache hit rate 91\.5%/)
@@ -357,10 +368,12 @@ test("recordAttribution: concurrent folds for one session both land", async () =
 
 // --- helpers -----------------------------------------------------------------
 
-test("estimatedTokensOf: ceil(chars/4), zero-safe, junk-safe", () => {
+test("estimatedTokensOf: ceil(chars/ratio), zero-safe, junk-safe", () => {
   assert.equal(estimatedTokensOf(0), 0)
   assert.equal(estimatedTokensOf(1), 1)
-  assert.equal(estimatedTokensOf(40000), 10000)
+  assert.equal(estimatedTokensOf(40000), 11429) // 3.5 fallback: ceil(40000/3.5)
+  assert.equal(estimatedTokensOf(40000, 4), 10000) // explicit ratio wins
+  assert.equal(estimatedTokensOf(40000, 0), 11429) // invalid ratio falls back
   assert.equal(estimatedTokensOf(-5), 0)
 })
 
@@ -471,4 +484,107 @@ test("snapshotKey / loadSnapshot / saveSnapshot / asContextSnapshot: round-trip,
     { tool: "read", chars: 7 },
     { tool: UNATTRIBUTED_TOOL, chars: 3 },
   ])
+})
+
+// --- calibration -------------------------------------------------------------
+
+test("calibrationKey / loadCalibration / saveCalibration: round-trip, junk-safe", async () => {
+  const store = new Map<string, unknown>()
+  const storage = {
+    get: async (key: string) => store.get(key),
+    set: async (key: string, value: unknown) => void store.set(key, value),
+  } as unknown as StorageDomain
+
+  assert.equal(calibrationKey("ses_1"), "session:ses_1:calibration")
+  const missing = await loadCalibration(storage, "ses_1")
+  assert.equal(missing.pairs, 0)
+  assert.equal(missing.charsSent, 0)
+
+  const cal = noteSnapshot(emptyCalibration(1), 5000, 100)
+  await saveCalibration(storage, "ses_1", cal)
+  assert.deepEqual(await loadCalibration(storage, "ses_1"), cal)
+
+  await storage.set(calibrationKey("ses_2"), "junk")
+  assert.equal((await loadCalibration(storage, "ses_2")).pairs, 0)
+})
+
+test("noteSnapshot / noteUsage: pair the full snapshot chars with the prompt delta", () => {
+  let cal = emptyCalibration(1)
+  cal = noteSnapshot(cal, 10000, 100)
+  cal = noteUsage(cal, 50000, 200) // baseline: no delta yet
+  assert.equal(cal.pairs, 0)
+  assert.equal(cal.pendingChars, null, "the pending snapshot is consumed")
+  assert.equal(cal.lastPromptTokens, 50000)
+
+  cal = noteSnapshot(cal, 12000, 300)
+  cal = noteUsage(cal, 53000, 400) // the delta IS the request's full prompt
+  assert.equal(cal.pairs, 1)
+  assert.equal(cal.charsSent, 12000, "the full snapshot chars, not a delta")
+  assert.equal(cal.promptTokens, 3000)
+
+  cal = noteSnapshot(cal, 15000, 500)
+  cal = noteUsage(cal, 56000, 600)
+  assert.equal(cal.pairs, 2)
+  assert.equal(cal.charsSent, 27000)
+  assert.equal(cal.promptTokens, 6000)
+  assert.equal(calibrationRatio(cal), null, "two pairs is below the minimum")
+})
+
+test("noteUsage: an unpaired reading only refreshes the baseline", () => {
+  let cal = emptyCalibration(1)
+  cal = noteSnapshot(cal, 10000, 100)
+  cal = noteUsage(cal, 50000, 200) // baseline
+  cal = noteSnapshot(cal, 12000, 300)
+  cal = noteUsage(cal, 53000, 400) // pairs
+  assert.equal(cal.pairs, 1)
+
+  cal = noteUsage(cal, 55000, 500) // no pending: title/compaction case
+  assert.equal(cal.pairs, 1, "an unpaired reading credits nothing")
+  assert.equal(cal.promptTokens, 3000)
+  assert.equal(cal.charsSent, 12000)
+  assert.equal(cal.lastPromptTokens, 55000)
+})
+
+test("noteUsage: a stale pending snapshot cannot pair", () => {
+  let cal = emptyCalibration(1)
+  cal = noteSnapshot(cal, 10000, 100)
+  cal = noteUsage(cal, 50000, 200) // baseline
+  cal = noteSnapshot(cal, 12000, 300)
+  cal = noteUsage(cal, 53000, 300 + 10 * 60_000 + 1) // pending is too old
+  assert.equal(cal.pairs, 0, "the stale pending is dropped, not paired")
+  assert.equal(cal.promptTokens, 0)
+  assert.equal(cal.pendingChars, null)
+})
+
+test("calibrationRatio / calibrationSummary: guards on pairs, tokens, and sane bounds", () => {
+  const base = { ...emptyCalibration(1), charsSent: 120000, promptTokens: 33000, pairs: 5 }
+  const ratio = calibrationRatio(base)
+  assert.ok(ratio !== null && Math.abs(ratio - 120000 / 33000) < 1e-9)
+  const summary = calibrationSummary(base)
+  assert.ok(summary)
+  assert.equal(summary.pairs, 5)
+  assert.equal(calibrationRatio({ ...base, pairs: CALIBRATION_MIN_PAIRS - 1 }), null)
+  assert.equal(calibrationRatio({ ...base, promptTokens: 9999 }), null)
+  assert.equal(calibrationRatio({ ...base, charsSent: 1000000, promptTokens: 10000 }), null)
+  assert.equal(calibrationRatio({ ...base, charsSent: 10000, promptTokens: 33000 }), null)
+  assert.equal(calibrationSummary({ ...base, pairs: 0 }), null)
+})
+
+test("asCalibration: narrows stored junk to a safe record", () => {
+  assert.equal(asCalibration(undefined).pairs, 0)
+  assert.equal(asCalibration([1]).pairs, 0)
+  const cal = asCalibration({
+    charsSent: -5,
+    promptTokens: 3.9,
+    pairs: "x",
+    pendingChars: -1,
+    lastPromptTokens: 7.7,
+    updatedAt: 9,
+  })
+  assert.equal(cal.charsSent, 0)
+  assert.equal(cal.promptTokens, 3)
+  assert.equal(cal.pairs, 0)
+  assert.equal(cal.pendingChars, null)
+  assert.equal(cal.lastPromptTokens, 7)
+  assert.equal(cal.updatedAt, 9)
 })

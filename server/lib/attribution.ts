@@ -15,14 +15,16 @@
  *    sizes at `execute.after` (already after OpenCode's native `tool_output`
  *    limits, hence "observed", not "raw") and the category sizes of the
  *    current-request snapshot.
- *  - Every token figure is an ESTIMATE (`chars / 4`) and must render with `~`.
+ *  - Every token figure is an ESTIMATE — chars divided by a chars-per-token
+ *    ratio (the session's own measurement when available, else the
+ *    install-measured 3.5 fallback) — and must render with `~`.
  *  - Provider usage (`session.usage.updated`, `TokenUsageState`) is the only
  *    authoritative token data and is never mixed into the estimates.
  *
- * Counters only — no tool text is stored anywhere here. The logic is pure and
- * carries no runtime dependency: the storage helpers take the domain as a
- * parameter and every import is type-only, so the whole surface is
- * unit-testable under `node --test`.
+ * Counters only — no tool text is stored anywhere here. Helpers take the
+ * storage domain as a parameter and the value imports are sibling modules
+ * (`quality.ts`, `storage.ts`), so the whole surface is unit-testable under
+ * `node --test` with no external dependency.
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { safeJson } from "./quality.ts"
@@ -289,21 +291,37 @@ export type AttributionReport = {
 export type ReportOptions = {
   /** Top rows shown per list; clamped to 1–50. */
   topN?: number
+  /** Session calibration; when absent the fallback ratio is used. */
+  calibration?: CalibrationSummary | null
 }
 
 /**
- * Estimate tokens from an exact char count: `chars / 4`. Same labelled
- * heuristic as `quality.ts#estimateTokens`, kept local because the input here
- * is a count, not text. Always render the result with `~`.
+ * Fallback chars-per-token ratio, measured on this install 2026-10-08
+ * (`npm run calibrate`: 3.47 weighted across 11,751 request pairs; 3.61 for
+ * additions >= 2000 chars). Sessions override it live once they have paired
+ * snapshot→usage data. Always render the result with `~`.
  */
-export function estimatedTokensOf(chars: number): number {
+export const FALLBACK_CHARS_PER_TOKEN = 3.5
+
+/**
+ * Estimate tokens from an exact char count at the given ratio. Same labelled
+ * heuristic as `quality.ts#estimateTokens` (which stays at chars/4 for the
+ * occupancy reading only); kept local because the input here is a count, not
+ * text.
+ */
+export function estimatedTokensOf(chars: number, charsPerToken = FALLBACK_CHARS_PER_TOKEN): number {
   const n = count(chars)
-  return n === 0 ? 0 : Math.ceil(n / 4)
+  const ratio =
+    typeof charsPerToken === "number" && Number.isFinite(charsPerToken) && charsPerToken > 0
+      ? charsPerToken
+      : FALLBACK_CHARS_PER_TOKEN
+  return n === 0 ? 0 : Math.ceil(n / ratio)
 }
 
 const fmtInt = (value: number): string => value.toLocaleString("en-US")
 
-const fmtTok = (chars: number): string => `~${fmtInt(estimatedTokensOf(chars))} tok`
+const fmtTok = (chars: number, charsPerToken: number): string =>
+  `~${fmtInt(estimatedTokensOf(chars, charsPerToken))} tok`
 
 const share = (part: number, whole: number): string =>
   whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : "n/a"
@@ -313,10 +331,10 @@ const money = (value: number): string =>
 
 const clip = (name: string, max = 28): string => (name.length <= max ? name : `${name.slice(0, max - 1)}…`)
 
-function snapshotLines(snapshot: ContextSnapshot, topN: number): string[] {
+function snapshotLines(snapshot: ContextSnapshot, topN: number, charsPerToken: number): string[] {
   const lines: string[] = ["Current request (last outgoing context) — estimated"]
   const row = (label: string, chars: number, pct?: string): string =>
-    `  ${label.padEnd(16)}${fmtTok(chars).padStart(12)}${pct ? `   ${pct}` : ""}`
+    `  ${label.padEnd(16)}${fmtTok(chars, charsPerToken).padStart(12)}${pct ? `   ${pct}` : ""}`
   const base = snapshot.totalChars
   lines.push(row("system", snapshot.systemChars, share(snapshot.systemChars, base)))
   lines.push(row("user", snapshot.userChars, share(snapshot.userChars, base)))
@@ -325,14 +343,14 @@ function snapshotLines(snapshot: ContextSnapshot, topN: number): string[] {
   lines.push(row("tool results", snapshot.toolTotalChars, share(snapshot.toolTotalChars, base)))
   const shown = snapshot.toolResults.slice(0, topN)
   for (const entry of shown) {
-    lines.push(`    ${clip(entry.tool, 18).padEnd(18)}${fmtTok(entry.chars).padStart(12)}`)
+    lines.push(`    ${clip(entry.tool, 18).padEnd(18)}${fmtTok(entry.chars, charsPerToken).padStart(12)}`)
   }
   const hiddenKept = snapshot.toolResults.slice(topN)
   const hiddenChars =
     hiddenKept.reduce((sum, entry) => sum + entry.chars, 0) + snapshot.toolOverflowChars
   const hiddenCount = hiddenKept.length + snapshot.toolOverflowCount
   if (hiddenCount > 0) {
-    lines.push(`    … ${hiddenCount} more tool row(s) (${fmtTok(hiddenChars)})`)
+    lines.push(`    … ${hiddenCount} more tool row(s) (${fmtTok(hiddenChars, charsPerToken)})`)
   }
   lines.push(row("tool catalogue", snapshot.catalogueChars, share(snapshot.catalogueChars, base)))
   lines.push(row("total", snapshot.totalChars))
@@ -428,8 +446,14 @@ export function formatAttributionReport(
       ? Math.min(50, Math.max(1, Math.floor(requested)))
       : DEFAULT_TOP_N
 
+  const calibration = options.calibration ?? null
+  const charsPerToken = calibration?.ratio ?? FALLBACK_CHARS_PER_TOKEN
+  const estimateLabel = calibration
+    ? `~ tokens calibrated on this session (${calibration.ratio.toFixed(2)} chars/token over ${calibration.pairs} requests)`
+    : `~ tokens at ${FALLBACK_CHARS_PER_TOKEN} chars/token (uncalibrated — install-measured fallback)`
+
   const lines: string[] = [
-    "Context attribution — exact chars (observed), ~ tokens (chars/4 estimates), authoritative provider totals.",
+    `Context attribution — exact chars (observed), ${estimateLabel}, authoritative provider totals.`,
   ]
   const section = (block: string[]): void => {
     if (block.length === 0) return
@@ -441,7 +465,7 @@ export function formatAttributionReport(
   } else if (report.snapshot === null) {
     section(["Current request: no snapshot captured yet — it starts with the next outgoing request."])
   } else {
-    section(snapshotLines(report.snapshot, topN))
+    section(snapshotLines(report.snapshot, topN, charsPerToken))
   }
 
   section(ledgerLines(report.ledger, topN))
@@ -704,4 +728,161 @@ export async function saveSnapshot(
   snapshot: ContextSnapshot,
 ): Promise<void> {
   await storage.set(snapshotKey(sessionID), snapshot as unknown as Parameters<StorageDomain["set"]>[1])
+}
+
+// --- Calibration --------------------------------------------------------------
+//
+// The `~` token figures divide observed chars by a chars-per-token ratio. The
+// fallback ratio is install-measured (`npm run calibrate`, 2026-10-08: 3.47
+// weighted / 3.61 on large additions across 11,751 request pairs), but a
+// session can measure its own: every primary request fires the `context` hook
+// (chars about to be sent) and then `session.usage.updated` (the provider's
+// cumulative prompt count). The delta between two usage readings is that
+// request's prompt size — the reading is cumulative, so the delta between two
+// readings IS that request's full prompt tokens. Pairing it with the request's
+// full snapshot chars yields `chars / promptTokens` for the content mix
+// actually sent.
+//
+// Pairing is conservative: a usage update only pairs when a fresh snapshot is
+// pending (title/compaction requests fire usage without a context snapshot and
+// are skipped — their readings still advance the baseline, so the next delta
+// stays clean), and the pending snapshot expires so a lost update cannot pair
+// with a later request. `calibrationRatio` returns null until enough pairs and
+// tokens exist, or when the ratio is outside a sane range.
+
+export type CalibrationState = {
+  /** Chars of the requests that were paired (full snapshot totals). */
+  charsSent: number
+  /** Provider prompt tokens (input + cache read + cache write) for those pairs. */
+  promptTokens: number
+  /** Completed snapshot→usage pairs. */
+  pairs: number
+  /** Chars of the request awaiting its usage update; null once consumed. */
+  pendingChars: number | null
+  /** When the pending snapshot was taken (freshness guard). */
+  pendingAt: number
+  /** Last cumulative prompt reading, for deltas. */
+  lastPromptTokens: number | null
+  updatedAt: number
+}
+
+export type CalibrationSummary = {
+  ratio: number
+  pairs: number
+  promptTokens: number
+}
+
+/** Below these, a session ratio is too thin to show. */
+export const CALIBRATION_MIN_PAIRS = 3
+export const CALIBRATION_MIN_TOKENS = 10_000
+/** A pending snapshot older than this cannot pair (a lost usage update). */
+export const CALIBRATION_PENDING_MAX_AGE_MS = 10 * 60_000
+/** Outside this range the data is anomalous; stay uncalibrated. */
+export const CALIBRATION_MIN_RATIO = 2
+export const CALIBRATION_MAX_RATIO = 6
+
+export function emptyCalibration(now = Date.now()): CalibrationState {
+  return {
+    charsSent: 0,
+    promptTokens: 0,
+    pairs: 0,
+    pendingChars: null,
+    pendingAt: 0,
+    lastPromptTokens: null,
+    updatedAt: now,
+  }
+}
+
+/** Narrow stored JSON to a calibration record, tolerating junk. */
+export function asCalibration(value: unknown): CalibrationState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return emptyCalibration()
+  const v = value as Record<string, unknown>
+  const pending =
+    typeof v.pendingChars === "number" && Number.isFinite(v.pendingChars) && v.pendingChars > 0
+      ? Math.floor(v.pendingChars)
+      : null
+  const lastPrompt =
+    typeof v.lastPromptTokens === "number" && Number.isFinite(v.lastPromptTokens)
+      ? Math.floor(v.lastPromptTokens)
+      : null
+  return {
+    charsSent: count(v.charsSent),
+    promptTokens: count(v.promptTokens),
+    pairs: count(v.pairs),
+    pendingChars: pending,
+    pendingAt: count(v.pendingAt),
+    lastPromptTokens: lastPrompt,
+    updatedAt: count(v.updatedAt),
+  }
+}
+
+/** Record the chars of the request about to be sent (context hook). */
+export function noteSnapshot(cal: CalibrationState, chars: number, now = Date.now()): CalibrationState {
+  return { ...cal, pendingChars: count(chars), pendingAt: now, updatedAt: now }
+}
+
+/**
+ * Record a usage reading (cumulative prompt tokens). The delta against the
+ * previous reading is the request's full prompt, so it pairs with the full
+ * pending snapshot chars; always refreshes the delta baseline.
+ */
+export function noteUsage(cal: CalibrationState, promptTokens: number, now = Date.now()): CalibrationState {
+  const prompt = count(promptTokens)
+  const last = cal.lastPromptTokens
+  const delta = last !== null && prompt > last ? prompt - last : 0
+  const pending = cal.pendingChars
+  const fresh =
+    pending !== null && pending > 0 && now - cal.pendingAt <= CALIBRATION_PENDING_MAX_AGE_MS
+  const paired = fresh && delta > 0
+  return {
+    charsSent: cal.charsSent + (paired ? (pending ?? 0) : 0),
+    promptTokens: cal.promptTokens + (paired ? delta : 0),
+    pairs: cal.pairs + (paired ? 1 : 0),
+    pendingChars: null,
+    pendingAt: cal.pendingAt,
+    lastPromptTokens: prompt,
+    updatedAt: now,
+  }
+}
+
+/** The session's measured ratio, or null when the data is too thin or absurd. */
+export function calibrationRatio(cal: CalibrationState): number | null {
+  if (cal.pairs < CALIBRATION_MIN_PAIRS) return null
+  if (cal.promptTokens < CALIBRATION_MIN_TOKENS) return null
+  if (cal.charsSent <= 0) return null
+  const ratio = cal.charsSent / cal.promptTokens
+  if (!Number.isFinite(ratio) || ratio < CALIBRATION_MIN_RATIO || ratio > CALIBRATION_MAX_RATIO) {
+    return null
+  }
+  return ratio
+}
+
+/** The summary the formatter consumes; null when uncalibrated. */
+export function calibrationSummary(cal: CalibrationState): CalibrationSummary | null {
+  const ratio = calibrationRatio(cal)
+  if (ratio === null) return null
+  return { ratio, pairs: cal.pairs, promptTokens: cal.promptTokens }
+}
+
+// --- Calibration storage (session-scoped) -------------------------------------
+
+/** Stable storage key for a session's chars-per-token calibration. */
+export const calibrationKey = (sessionID: string): string => `session:${sessionID}:calibration`
+
+export async function loadCalibration(
+  storage: StorageDomain,
+  sessionID: string,
+): Promise<CalibrationState> {
+  return asCalibration(await storage.get(calibrationKey(sessionID)))
+}
+
+export async function saveCalibration(
+  storage: StorageDomain,
+  sessionID: string,
+  calibration: CalibrationState,
+): Promise<void> {
+  await storage.set(
+    calibrationKey(sessionID),
+    calibration as unknown as Parameters<StorageDomain["set"]>[1],
+  )
 }

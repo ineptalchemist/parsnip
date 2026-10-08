@@ -145,7 +145,10 @@ number. It is now used in three places, all labelled:
 - `bench/lib/metrics.ts` `tokensOf` — reported for continuity with older bench
   output.
 - `server/lib/attribution.ts` `estimatedTokensOf` — the per-tool and
-  per-category rows of the `parsnip_context` report, rendered with `~`.
+  per-category rows of the `parsnip_context` report, rendered with `~`; the
+  divisor is the session-calibrated ratio when available, else the
+  install-measured fallback (3.5 — see "Calibration" under Context
+  attribution).
 
 The authoritative token measurement is the `session.usage.updated` ledger, which
 is measured provider usage. The reread multiplier is chars ÷ chars, so no
@@ -165,8 +168,11 @@ here because each is easy to get wrong silently:
 - **Exact vs estimated vs authoritative.** Every character count is exact *as
   observed by the plugin*: the text size of each tool result at
   `execute.after`, and the category sizes of the current-request snapshot.
-  Every token figure is an estimate — `chars / 4`, always rendered `~` — and is
-  never presented next to provider numbers. The authoritative numbers stay the
+  Every token figure is an estimate — chars divided by a chars-per-token
+  ratio, always rendered `~` — and is never presented next to provider
+  numbers. The ratio is the session's own measurement when it has paired
+  enough snapshot→usage data, otherwise the install-measured fallback (3.5;
+  see "Calibration" below). The authoritative numbers stay the
   `session.usage.updated` ledger, shown as its own block.
 - **"Observed", not "raw".** Sizes are measured after OpenCode's native
   `tool_output` limits, so they describe what could actually enter the
@@ -191,6 +197,26 @@ here because each is easy to get wrong silently:
   `topN`, default `10`); V2 commands cannot return output, so there is no
   `/parsnip context` text path in v1. Capture defaults ON — it changes no
   request bytes.
+
+### Calibration (2026-10-08)
+
+The fallback ratio is measured, not guessed: `npm run calibrate` pairs each
+session's consecutive requests — the provider's prompt-token delta
+(`input + cache.read + cache.write`) against the exact chars added in
+between — and reports the implied chars-per-token. Measured across 282
+sessions / 11,751 pairs: **3.47 weighted overall, 3.61 for additions
+≥ 2000 chars**; per model the spread is ~3.3–3.9 (`deepseek-v4.1-flash`
+3.65). The 3.5 fallback is the rounded overall figure; small pairs read
+lower because per-message overhead tokens carry no chars.
+
+Sessions calibrate live: the `context` hook arms a pending snapshot; the
+next `session.usage.updated` carries a *cumulative* reading, so its delta is
+exactly that request's full prompt tokens — paired with the full snapshot
+chars. Once a session has ≥ 3 pairs and ≥ 10k prompt tokens the report
+switches its label and divisor to the measured ratio (`calibrationRatio`
+rejects ratios outside 2–6 as anomalous). Title/compaction usage updates
+fire without a context snapshot and are skipped — their readings still
+advance the baseline, so the next delta stays clean.
 
 ---
 

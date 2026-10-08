@@ -31,10 +31,15 @@ import type { CommandEditor } from "@opencode/plugin/promise/command"
 import type { Model } from "@opencode/schema/model"
 import {
   buildSnapshot,
+  calibrationSummary,
   formatAttributionReport,
   loadAttribution,
+  loadCalibration,
   loadSnapshot,
+  noteSnapshot,
+  noteUsage,
   recordAttribution,
+  saveCalibration,
   saveSnapshot,
   snapshotInputFromContext,
   type AttributionReport,
@@ -333,6 +338,27 @@ async function register(
   }
 }
 
+/**
+ * Record one `session.usage.updated` reading: overwrite the authoritative
+ * usage ledger and advance the calibration pair. The payload is the session's
+ * CUMULATIVE usage, so the calibration delta is taken against the previous
+ * reading; a usage update with no fresh pending snapshot (title, compaction)
+ * only refreshes the baseline. Exported for the wiring tests.
+ */
+export async function recordUsageUpdate(
+  ctx: Plugin.Context,
+  data: { sessionID: string; tokens: unknown; cost?: unknown },
+): Promise<void> {
+  const usage = tokenUsageFrom(data.tokens, data.cost)
+  await saveTokenUsage(ctx.storage, data.sessionID, usage)
+  const calibration = await loadCalibration(ctx.storage, data.sessionID)
+  await saveCalibration(
+    ctx.storage,
+    data.sessionID,
+    noteUsage(calibration, usage.input + usage.cacheRead + usage.cacheWrite),
+  )
+}
+
 // --- Runtime config surfaces (tool + command) --------------------------------
 
 const CONFIG_TOOL_NAME = "parsnip_config"
@@ -609,7 +635,9 @@ function contextTool(ctx: Plugin.Context) {
       "per-tool ledger: observed vs retained chars and compression/dedup runs per " +
       "tool. scope=both shows everything. Character counts are exact as observed " +
       "by parsnip (after native output limits; retained figures are after " +
-      "compression). ~ token figures are chars/4 estimates, never billing facts. " +
+      "compression). ~ token figures use the session-calibrated chars/token " +
+      "ratio when available, else the install-measured 3.5 fallback — never " +
+      "billing facts. " +
       "Counters only — no tool text is stored or returned. topN widens the " +
       "per-tool lists (default 10, max 50).",
     input: {
@@ -645,8 +673,9 @@ function contextTool(ctx: Plugin.Context) {
       }
       report.usage = (await loadTokenUsage(ctx.storage, toolContext.sessionID)) ?? null
 
+      const calibration = calibrationSummary(await loadCalibration(ctx.storage, toolContext.sessionID))
       return {
-        content: [{ type: "text", text: formatAttributionReport(report, { topN }) }],
+        content: [{ type: "text", text: formatAttributionReport(report, { topN, calibration }) }],
       }
     },
   }
@@ -856,8 +885,16 @@ const parsnip: Plugin.Plugin = {
 
           // Request snapshot for the attribution report — read-only on the
           // request; storage is the only write. Reflects what this request will
-          // actually carry (compressed and deduplicated results included).
-          await saveSnapshot(ctx.storage, event.sessionID, buildSnapshot(snapshotInputFromContext(event)))
+          // actually carry (compressed and deduplicated results included). The
+          // snapshot also arms the calibration pair: the usage update that
+          // follows this request supplies the matching prompt-token delta.
+          const snapshot = buildSnapshot(snapshotInputFromContext(event))
+          await saveSnapshot(ctx.storage, event.sessionID, snapshot)
+          await saveCalibration(
+            ctx.storage,
+            event.sessionID,
+            noteSnapshot(await loadCalibration(ctx.storage, event.sessionID), snapshot.totalChars),
+          )
 
           // INVARIANT: nothing above writes to event.messages / event.system /
           // event.tools. Keep it that way.
@@ -1120,11 +1157,7 @@ const parsnip: Plugin.Plugin = {
             }
             if (event.type !== "session.usage.updated") continue
             try {
-              await saveTokenUsage(
-                ctx.storage,
-                event.data.sessionID,
-                tokenUsageFrom(event.data.tokens, event.data.cost),
-              )
+              await recordUsageUpdate(ctx, event.data)
             } catch (error) {
               console.error("[parsnip] usage capture failed (ignored):", error)
             }

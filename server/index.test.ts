@@ -8,7 +8,7 @@
  */
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import ctxGuard, { guarded } from "./index.ts"
+import ctxGuard, { guarded, recordUsageUpdate } from "./index.ts"
 import { DEDUP_MARKER, compressResult, textLengthOf } from "./lib/toolhooks.ts"
 import { headTail } from "./lib/selectors.ts"
 import { effectiveConfig } from "./lib/config.ts"
@@ -1015,6 +1015,99 @@ test("parsnip_context: topN widens the per-tool list", async () => {
   assert.match(small.content[0].text, /9 more tool\(s\)/)
   const wide = await tool.execute({ scope: "session", topN: 12 }, { sessionID: "ses_test" })
   assert.ok(!wide.content[0].text.includes("more tool(s)"))
+})
+
+test("context hook: arms the calibration pair with the snapshot chars", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.hooks.context(contextEvent())
+
+  const snapshot = h.store.get("session:ses_test:snapshot") as AnyRecord
+  const calibration = h.store.get("session:ses_test:calibration") as AnyRecord
+  assert.ok(snapshot && calibration, "snapshot and calibration records written")
+  assert.equal(calibration.pendingChars, snapshot.totalChars)
+  assert.equal(calibration.pairs, 0)
+  assert.equal(calibration.lastPromptTokens, null)
+})
+
+test("parsnip_context: switches to the calibrated ratio once the session has data", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("session:ses_test:snapshot", {
+    systemChars: 40000,
+    userChars: 4000,
+    assistantChars: 8000,
+    reasoningChars: 0,
+    toolResults: [{ tool: "shell", chars: 8000 }, { tool: "read", chars: 2000 }],
+    toolTotalChars: 10000,
+    toolOverflowCount: 0,
+    toolOverflowChars: 0,
+    catalogueChars: 2000,
+    totalChars: 64000,
+    updatedAt: 1,
+  })
+  await h.ctx.storage.set("session:ses_test:calibration", {
+    charsSent: 74000,
+    promptTokens: 20000,
+    pairs: 5,
+    pendingChars: null,
+    pendingAt: 0,
+    lastPromptTokens: 250000,
+    updatedAt: 1,
+  })
+
+  const tool = findContextTool(h)
+  const out = await tool.execute({ scope: "current" }, { sessionID: "ses_test" })
+  const text = out.content[0].text
+  assert.match(text, /calibrated on this session \(3\.70 chars\/token over 5 requests\)/)
+  // 64,000 chars at 3.70 chars/token → ceil(17297.3) = 17,298.
+  assert.match(text, /~17,298 tok/)
+  assert.ok(!text.includes("fallback"), "the fallback label is replaced once calibrated")
+})
+
+test("recordUsageUpdate: writes the usage ledger and advances the calibration pair", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  await h.ctx.storage.set("session:ses_test:calibration", {
+    charsSent: 0,
+    promptTokens: 0,
+    pairs: 0,
+    pendingChars: 10000,
+    pendingAt: Date.now(),
+    lastPromptTokens: null,
+    updatedAt: 1,
+  })
+
+  await recordUsageUpdate(h.ctx, {
+    sessionID: "ses_test",
+    tokens: { input: 40, output: 5, reasoning: 1, cache: { read: 3000, write: 60 } },
+    cost: 0.01,
+  })
+
+  const usage = h.store.get("session:ses_test:usage") as AnyRecord
+  assert.equal(usage.input, 40)
+  assert.equal(usage.cacheRead, 3000)
+  assert.equal(usage.cost, 0.01)
+
+  let calibration = h.store.get("session:ses_test:calibration") as AnyRecord
+  assert.equal(calibration.lastPromptTokens, 3100, "input + cache read + cache write")
+  assert.equal(calibration.pairs, 0, "the first reading only sets the baseline")
+
+  await h.ctx.storage.set("session:ses_test:calibration", {
+    ...calibration,
+    pendingChars: 12000,
+    pendingAt: Date.now(),
+  })
+  await recordUsageUpdate(h.ctx, {
+    sessionID: "ses_test",
+    tokens: { input: 10, cache: { read: 6000, write: 0 } },
+  })
+  calibration = h.store.get("session:ses_test:calibration") as AnyRecord
+  assert.equal(calibration.pairs, 1)
+  assert.equal(calibration.charsSent, 12000, "the full snapshot chars")
+  assert.equal(calibration.promptTokens, 2910)
 })
 
 test("config tool: toggles global compression and execute.after honors it", async () => {

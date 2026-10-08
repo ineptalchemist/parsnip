@@ -12,6 +12,7 @@
     "eval": "node bench/eval.ts",
     "eval:export": "node bench/export-facts.ts",
     "savings": "node bench/read-savings.ts",
+    "calibrate": "node bench/calibrate.ts",
     "sweep": "node bench/threshold.ts"
   },
   "devDependencies": {
