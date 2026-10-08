@@ -138,16 +138,58 @@ re-run the comparison against any future local model.
 
 The plugin originally reported savings in tokens using `chars / 4`. That
 conversion was never calibrated against a provider and quietly became the headline
-number. It is now used in exactly two places, both labelled:
+number. It is now used in three places, all labelled:
 
 - `server/lib/quality.ts` `estimateTokens` — the occupancy reading only, so the
   continuity block has a cheap relative number.
 - `bench/lib/metrics.ts` `tokensOf` — reported for continuity with older bench
   output.
+- `server/lib/attribution.ts` `estimatedTokensOf` — the per-tool and
+  per-category rows of the `parsnip_context` report, rendered with `~`.
 
 The authoritative token measurement is the `session.usage.updated` ledger, which
 is measured provider usage. The reread multiplier is chars ÷ chars, so no
 conversion enters it at all.
+
+---
+
+## Context attribution — the `parsnip_context` contract
+
+Added 2026-10-08. Motivated by a specific gap: `opencode-context-usage` (the
+`/context` TUI plugin) reports accounting totals — input/output/cache/cost for
+the session and its subagents — but nothing reports *attribution*: which tools
+and categories the context actually came from. OpenCode never will, because
+request usage arrives as a single aggregate. The decisions below are pinned
+here because each is easy to get wrong silently:
+
+- **Exact vs estimated vs authoritative.** Every character count is exact *as
+  observed by the plugin*: the text size of each tool result at
+  `execute.after`, and the category sizes of the current-request snapshot.
+  Every token figure is an estimate — `chars / 4`, always rendered `~` — and is
+  never presented next to provider numbers. The authoritative numbers stay the
+  `session.usage.updated` ledger, shown as its own block.
+- **"Observed", not "raw".** Sizes are measured after OpenCode's native
+  `tool_output` limits, so they describe what could actually enter the
+  transcript, not what the tool produced.
+- **Counters only, no text.** The attribution record stores numbers; raw tool
+  output never enters it. Read-only on every request; `ctx.storage` is the only
+  write target.
+- **Scope: current session only.** Subagent (child) sessions keep their own
+  records; walking the delegation tree is out of scope for v1 (the `/context`
+  TUI plugin covers combined subagent totals).
+- **Blind spots, stated in the report.** Code-mode MCP calls collapse into
+  `execute`; media parts count as placeholders; current-request tool rows are
+  per-tool only where the message part identifies the tool (shape probe
+  pending), else one unattributed bucket; no historical backfill — counting
+  starts when capture is enabled; the report tool excludes itself.
+- **Bounds.** The ledger keeps the top `ATTRIBUTION_TOOL_LIMIT` tools by
+  observed chars (smallest evicted first, eviction count reported); a snapshot
+  keeps the top `SNAPSHOT_TOOL_LIMIT` tool rows with the remainder folded into
+  an overflow figure.
+- **Surface.** Agent tool `parsnip_context` (`scope: current|session|both`,
+  `topN`, default `10`); V2 commands cannot return output, so there is no
+  `/parsnip context` text path in v1. Capture defaults ON — it changes no
+  request bytes.
 
 ---
 
