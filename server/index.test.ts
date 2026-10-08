@@ -891,7 +891,7 @@ function commandCollector() {
   return { added, editor: { add: (definition: AnyRecord) => void added.push(definition) } }
 }
 
-test("setup registers the config + recall tools and a config command", async () => {
+test("setup registers the config + context + recall tools and a config command", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)
 
@@ -899,7 +899,7 @@ test("setup registers the config + recall tools and a config command", async () 
   h.toolTransforms[0](editor)
   assert.deepEqual(
     added.map((t) => t.name).sort(),
-    ["parsnip_config", "parsnip_recall"],
+    ["parsnip_config", "parsnip_context", "parsnip_recall"],
   )
   for (const tool of added) assert.equal(typeof tool.execute, "function")
 
@@ -908,6 +908,113 @@ test("setup registers the config + recall tools and a config command", async () 
   assert.equal(commands.added.length, 1)
   assert.equal(commands.added[0].name, "parsnip")
   assert.equal(typeof commands.added[0].execute, "function")
+})
+
+// --- parsnip_context tool ----------------------------------------------------
+
+function findContextTool(h: AnyRecord) {
+  const tools = collectorEditor()
+  h.toolTransforms[0](tools.editor)
+  const tool = tools.added.find((t) => t.name === "parsnip_context")
+  assert.ok(tool, "parsnip_context tool registered")
+  return tool
+}
+
+test("parsnip_context: current scope renders the snapshot + provider totals only", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  await h.ctx.storage.set("session:ses_test:snapshot", {
+    systemChars: 1000,
+    userChars: 100,
+    assistantChars: 200,
+    reasoningChars: 50,
+    toolResults: [{ tool: "shell", chars: 400 }],
+    toolTotalChars: 400,
+    toolOverflowCount: 0,
+    toolOverflowChars: 0,
+    catalogueChars: 300,
+    totalChars: 2050,
+    updatedAt: 1,
+  })
+  await h.ctx.storage.set("session:ses_test:attribution", {
+    tools: {
+      shell: {
+        calls: 2,
+        nonEmptyResults: 2,
+        observedChars: 800,
+        retainedChars: 400,
+        omittedChars: 400,
+        compressionCount: 1,
+        dedupCount: 0,
+      },
+    },
+    droppedTools: 0,
+    updatedAt: 1,
+  })
+  await h.ctx.storage.set("session:ses_test:usage", {
+    input: 1000,
+    output: 500,
+    reasoning: 100,
+    cacheRead: 9000,
+    cacheWrite: 100,
+    cost: 0.5,
+    updatedAt: 1,
+  })
+
+  const tool = findContextTool(h)
+
+  const current = await tool.execute({ scope: "current" }, { sessionID: "ses_test" })
+  const currentText = current.content[0].text
+  assert.match(currentText, /Current request \(last outgoing context\)/)
+  assert.match(currentText, /Provider totals \(session, authoritative/)
+  assert.ok(!currentText.includes("Session tool ledger"), "ledger hidden for current scope")
+
+  const session = await tool.execute({ scope: "session" }, { sessionID: "ses_test" })
+  const sessionText = session.content[0].text
+  assert.match(sessionText, /Session tool ledger/)
+  assert.match(sessionText, /shell\s+2\s+800\s+400\s+400\s+1\s+0/)
+  assert.ok(!sessionText.includes("Current request"), "snapshot hidden for session scope")
+
+  const both = await tool.execute({ scope: "both" }, { sessionID: "ses_test" })
+  const bothText = both.content[0].text
+  assert.match(bothText, /Current request/)
+  assert.match(bothText, /Session tool ledger/)
+})
+
+test("parsnip_context: defaults to current scope and states empty stores explicitly", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  const tool = findContextTool(h)
+
+  const out = await tool.execute({}, { sessionID: "ses_test" })
+  const text = out.content[0].text
+  assert.match(text, /no snapshot captured yet/)
+  assert.match(text, /no session\.usage\.updated recorded/)
+  assert.ok(!text.includes("Session tool ledger"), "ledger hidden by default")
+})
+
+test("parsnip_context: topN widens the per-tool list", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+  const tools: Record<string, AnyRecord> = {}
+  for (let i = 1; i <= 12; i += 1) {
+    tools[`tool-${i}`] = {
+      calls: 1,
+      nonEmptyResults: 1,
+      observedChars: i * 100,
+      retainedChars: i * 100,
+      omittedChars: 0,
+      compressionCount: 0,
+      dedupCount: 0,
+    }
+  }
+  await h.ctx.storage.set("session:ses_test:attribution", { tools, droppedTools: 0, updatedAt: 1 })
+
+  const tool = findContextTool(h)
+  const small = await tool.execute({ scope: "session", topN: 3 }, { sessionID: "ses_test" })
+  assert.match(small.content[0].text, /9 more tool\(s\)/)
+  const wide = await tool.execute({ scope: "session", topN: 12 }, { sessionID: "ses_test" })
+  assert.ok(!wide.content[0].text.includes("more tool(s)"))
 })
 
 test("config tool: toggles global compression and execute.after honors it", async () => {

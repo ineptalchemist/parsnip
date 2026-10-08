@@ -29,7 +29,16 @@ import type { SessionCompaction, SessionContext } from "@opencode/plugin/promise
 import type { ToolEditor } from "@opencode/plugin/promise/tool"
 import type { CommandEditor } from "@opencode/plugin/promise/command"
 import type { Model } from "@opencode/schema/model"
-import { buildSnapshot, recordAttribution, saveSnapshot, snapshotInputFromContext } from "./lib/attribution.ts"
+import {
+  buildSnapshot,
+  formatAttributionReport,
+  loadAttribution,
+  loadSnapshot,
+  recordAttribution,
+  saveSnapshot,
+  snapshotInputFromContext,
+  type AttributionReport,
+} from "./lib/attribution.ts"
 import { buildContinuityBlock, promptText as promptInputText, truncate } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
 import {
@@ -39,6 +48,7 @@ import {
   filePathOf,
   loadContinuity,
   loadSavings,
+  loadTokenUsage,
   saveContinuity,
   saveSavings,
   saveTokenUsage,
@@ -581,6 +591,68 @@ function recallTool(ctx: Plugin.Context) {
 }
 
 /**
+ * Agent-facing attribution report, added to the tool catalog via
+ * `ctx.tool.transform`. Read-only: renders the latest request snapshot, the
+ * session-wide per-tool ledger, and the authoritative provider totals. All
+ * character counts are exact as observed; ~ token figures are chars/4
+ * estimates; provider totals are the only billing facts.
+ */
+function contextTool(ctx: Plugin.Context) {
+  return {
+    name: CONTEXT_TOOL_NAME,
+    description:
+      "Read-only token-attribution report for this session: what the context is " +
+      "made of, and what it cost. scope=current (default) shows the last outgoing " +
+      "request's composition — system, user, assistant, reasoning, tool results by " +
+      "tool, tool catalogue — plus the session's authoritative provider totals " +
+      "(input/output/reasoning/cache/cost). scope=session shows the session-wide " +
+      "per-tool ledger: observed vs retained chars and compression/dedup runs per " +
+      "tool. scope=both shows everything. Character counts are exact as observed " +
+      "by parsnip (after native output limits; retained figures are after " +
+      "compression). ~ token figures are chars/4 estimates, never billing facts. " +
+      "Counters only — no tool text is stored or returned. topN widens the " +
+      "per-tool lists (default 10, max 50).",
+    input: {
+      type: "object",
+      properties: {
+        scope: {
+          type: "string",
+          enum: ["current", "session", "both"],
+          description:
+            "current (default) = last request composition + provider totals; " +
+            "session = session-wide per-tool ledger; both = all blocks.",
+        },
+        topN: {
+          type: "integer",
+          minimum: 1,
+          maximum: 50,
+          description: "Top rows per list (default 10).",
+        },
+      },
+      additionalProperties: false,
+    },
+    execute: async (rawInput: unknown, toolContext: { sessionID: string }) => {
+      const input = (rawInput && typeof rawInput === "object" ? rawInput : {}) as Record<string, unknown>
+      const scope = input.scope === "session" || input.scope === "both" ? input.scope : "current"
+      const topN = typeof input.topN === "number" ? input.topN : undefined
+
+      const report: AttributionReport = {}
+      if (scope !== "session") {
+        report.snapshot = (await loadSnapshot(ctx.storage, toolContext.sessionID)) ?? null
+      }
+      if (scope !== "current") {
+        report.ledger = await loadAttribution(ctx.storage, toolContext.sessionID)
+      }
+      report.usage = (await loadTokenUsage(ctx.storage, toolContext.sessionID)) ?? null
+
+      return {
+        content: [{ type: "text", text: formatAttributionReport(report, { topN }) }],
+      }
+    },
+  }
+}
+
+/**
  * Human-facing toggle: `/parsnip compression off`, `/parsnip dedup on
  * session`, `/parsnip reset`. A V2 command cannot return output, so this
  * applies the change silently — confirm by calling the `parsnip_config` tool.
@@ -724,6 +796,7 @@ const parsnip: Plugin.Plugin = {
         guarded("tool.transform", (editor: ToolEditor) => {
           editor.add(configTool(ctx))
           editor.add(recallTool(ctx))
+          editor.add(contextTool(ctx))
         }),
       ),
     )
