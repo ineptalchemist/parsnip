@@ -511,6 +511,44 @@ test("execute.after: the report tool never counts itself", async () => {
   assert.equal((event.result.content as AnyRecord[])[0].text, "report text")
 })
 
+test("context hook: persists a request snapshot with per-tool rows", async () => {
+  const h = makeHarness()
+  await ctxGuard.setup(h.ctx)
+
+  const event = contextEvent({
+    messages: [
+      { role: "user", content: [{ type: "text", text: "u".repeat(50) }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "a".repeat(30) },
+          { type: "reasoning", text: "r".repeat(20) },
+          { type: "tool-call", id: "c1", name: "shell", input: { command: "ls" } },
+          { type: "tool-result", id: "c1", name: "shell", result: { type: "text", value: "x".repeat(400) } },
+        ],
+      },
+    ],
+  })
+  const before = JSON.stringify(event)
+
+  await h.hooks.context(event)
+
+  assert.equal(JSON.stringify(event), before, "context hook mutated the event")
+
+  const snapshot = h.store.get("session:ses_test:snapshot") as AnyRecord
+  assert.ok(snapshot, "no request snapshot written")
+  assert.equal(snapshot.systemChars, 400)
+  assert.equal(snapshot.userChars, 50)
+  assert.equal(snapshot.assistantChars, 30)
+  assert.equal(snapshot.reasoningChars, 20)
+  assert.deepEqual(snapshot.toolResults, [{ tool: "shell", chars: 400 }])
+  assert.equal(snapshot.catalogueChars, JSON.stringify(event.tools).length)
+  assert.equal(
+    snapshot.totalChars,
+    400 + 50 + 30 + 20 + 400 + JSON.stringify(event.tools).length,
+  )
+})
+
 test("execute.after: a re-run with changed output is NOT suppressed (content-hash dedup)", async () => {
   const h = makeHarness()
   await ctxGuard.setup(h.ctx)

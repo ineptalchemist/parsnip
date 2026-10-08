@@ -25,6 +25,7 @@
  * unit-testable under `node --test`.
  */
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
+import { safeJson } from "./quality.ts"
 import type { TokenUsageState } from "./storage.ts"
 
 // --- Bounds and labels -------------------------------------------------------
@@ -542,4 +543,165 @@ export async function recordAttribution(
     })
     await saveAttribution(storage, input.sessionID, next)
   })
+}
+
+// --- Request snapshot --------------------------------------------------------
+//
+// `snapshotInputFromContext` classifies one outgoing request (the `context`
+// hook's event) into the bins `buildSnapshot` expects. The vocabulary is
+// pinned to the installed `@opencode/ai` schema
+// (`dist/schema/messages.d.ts`): messages are
+// `{ role: "system" | "user" | "assistant" | "tool", content: ContentPart[] }`
+// and content parts are tagged by `type` — `text`, `reasoning`, `tool-call`,
+// `tool-result` (which carries `name`), `media`, `compaction`, `effort`.
+//
+// Classification rules (see NOTES.md "Context attribution"):
+//  - text parts bucket by message role; unknown roles are skipped.
+//  - reasoning parts are their own bucket.
+//  - tool-result parts bucket by their `name`; a missing name lands in
+//    `UNATTRIBUTED_TOOL`.
+//  - tool-call arguments and `effort` parts are skipped: the categories count
+//    what their labels say, nothing else.
+//  - media parts count as the `[media]` placeholder; file entries inside a
+//    `content`-type result count as `[file]`.
+//  - `compaction` parts (summaries carried in history) count as assistant text.
+
+const MEDIA_PLACEHOLDER = "[media]"
+const FILE_PLACEHOLDER = "[file]"
+
+/** Text of a text-bearing part; "" for anything else. */
+function textOfPart(value: unknown): string {
+  if (typeof value === "string") return value
+  if (!value || typeof value !== "object") return ""
+  const part = value as Record<string, unknown>
+  return typeof part.text === "string" ? part.text : ""
+}
+
+/** Exact chars of a tool-result part's `result` value, by result kind. */
+function toolResultChars(result: unknown): number {
+  if (!result || typeof result !== "object") return 0
+  const r = result as Record<string, unknown>
+  const value = r.value
+  if (r.type === "content" && Array.isArray(value)) {
+    let sum = 0
+    for (const item of value) {
+      if (!item || typeof item !== "object") continue
+      const entry = item as Record<string, unknown>
+      if (entry.type === "text" && typeof entry.text === "string") sum += entry.text.length
+      else if (entry.type === "file") sum += FILE_PLACEHOLDER.length
+    }
+    return sum
+  }
+  if (typeof value === "string") return value.length
+  if (value === undefined) return 0
+  return safeJson(value).length
+}
+
+export type ContextLike = {
+  system?: readonly unknown[]
+  messages?: readonly unknown[]
+  tools?: Record<string, unknown>
+}
+
+/**
+ * Classify an outgoing request into the snapshot bins. Read-only and
+ * tolerant: unrecognised shapes contribute nothing rather than throwing.
+ */
+export function snapshotInputFromContext(input: ContextLike): SnapshotInput {
+  let systemChars = 0
+  for (const part of input.system ?? []) {
+    systemChars += textOfPart(part).length
+  }
+
+  let userChars = 0
+  let assistantChars = 0
+  let reasoningChars = 0
+  const toolResults: SnapshotToolEntry[] = []
+
+  for (const message of input.messages ?? []) {
+    if (!message || typeof message !== "object") continue
+    const m = message as Record<string, unknown>
+    const role = typeof m.role === "string" ? m.role : ""
+    const content = Array.isArray(m.content) ? m.content : []
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue
+      const p = part as Record<string, unknown>
+      const type = typeof p.type === "string" ? p.type : ""
+      if (type === "text" || type === "media") {
+        const chars = type === "text" ? textOfPart(p).length : MEDIA_PLACEHOLDER.length
+        if (role === "user") userChars += chars
+        else if (role === "assistant") assistantChars += chars
+        else if (role === "tool") toolResults.push({ tool: UNATTRIBUTED_TOOL, chars })
+        else if (role === "system") systemChars += chars
+      } else if (type === "reasoning") {
+        reasoningChars += textOfPart(p).length
+      } else if (type === "tool-result") {
+        toolResults.push({
+          tool: typeof p.name === "string" ? p.name : UNATTRIBUTED_TOOL,
+          chars: toolResultChars(p.result),
+        })
+      } else if (type === "compaction") {
+        assistantChars += textOfPart(p).length
+      }
+      // tool-call arguments and `effort` parts are deliberately not counted.
+    }
+  }
+
+  return {
+    systemChars,
+    userChars,
+    assistantChars,
+    reasoningChars,
+    toolResults,
+    catalogueChars: input.tools ? safeJson(input.tools).length : 0,
+  }
+}
+
+// --- Snapshot storage (session-scoped) ---------------------------------------
+
+/** Stable storage key for a session's latest request snapshot. */
+export const snapshotKey = (sessionID: string): string => `session:${sessionID}:snapshot`
+
+/** Narrow stored JSON to a snapshot, tolerating junk; undefined when unusable. */
+export function asContextSnapshot(value: unknown): ContextSnapshot | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const v = value as Record<string, unknown>
+  const rawTools = Array.isArray(v.toolResults) ? v.toolResults : []
+  const toolResults: SnapshotToolEntry[] = []
+  for (const entry of rawTools) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue
+    const e = entry as Record<string, unknown>
+    const chars = count(e.chars)
+    if (chars <= 0) continue
+    const tool = typeof e.tool === "string" && e.tool.trim().length > 0 ? e.tool.trim() : UNATTRIBUTED_TOOL
+    toolResults.push({ tool, chars })
+  }
+  return {
+    systemChars: count(v.systemChars),
+    userChars: count(v.userChars),
+    assistantChars: count(v.assistantChars),
+    reasoningChars: count(v.reasoningChars),
+    toolResults,
+    toolTotalChars: count(v.toolTotalChars),
+    toolOverflowCount: count(v.toolOverflowCount),
+    toolOverflowChars: count(v.toolOverflowChars),
+    catalogueChars: count(v.catalogueChars),
+    totalChars: count(v.totalChars),
+    updatedAt: count(v.updatedAt),
+  }
+}
+
+export async function loadSnapshot(
+  storage: StorageDomain,
+  sessionID: string,
+): Promise<ContextSnapshot | undefined> {
+  return asContextSnapshot(await storage.get(snapshotKey(sessionID)))
+}
+
+export async function saveSnapshot(
+  storage: StorageDomain,
+  sessionID: string,
+  snapshot: ContextSnapshot,
+): Promise<void> {
+  await storage.set(snapshotKey(sessionID), snapshot as unknown as Parameters<StorageDomain["set"]>[1])
 }

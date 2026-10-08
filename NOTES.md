@@ -178,10 +178,11 @@ here because each is easy to get wrong silently:
   records; walking the delegation tree is out of scope for v1 (the `/context`
   TUI plugin covers combined subagent totals).
 - **Blind spots, stated in the report.** Code-mode MCP calls collapse into
-  `execute`; media parts count as placeholders; current-request tool rows are
-  per-tool only where the message part identifies the tool (shape probe
-  pending), else one unattributed bucket; no historical backfill — counting
-  starts when capture is enabled; the report tool excludes itself.
+  `execute`; media and file parts count as placeholders; current-request tool
+  rows are per-tool via the part's `name` (vocabulary pinned to the installed
+  `@opencode/ai` schema), with an unattributed bucket as fallback; tool-call
+  arguments are not counted; no historical backfill — counting starts when
+  capture is enabled; the report tool excludes itself.
 - **Bounds.** The ledger keeps the top `ATTRIBUTION_TOOL_LIMIT` tools by
   observed chars (smallest evicted first, eviction count reported); a snapshot
   keeps the top `SNAPSHOT_TOOL_LIMIT` tool rows with the remainder folded into

@@ -29,7 +29,7 @@ import type { SessionCompaction, SessionContext } from "@opencode/plugin/promise
 import type { ToolEditor } from "@opencode/plugin/promise/tool"
 import type { CommandEditor } from "@opencode/plugin/promise/command"
 import type { Model } from "@opencode/schema/model"
-import { recordAttribution } from "./lib/attribution.ts"
+import { buildSnapshot, recordAttribution, saveSnapshot, snapshotInputFromContext } from "./lib/attribution.ts"
 import { buildContinuityBlock, promptText as promptInputText, truncate } from "./lib/compaction.ts"
 import { measureContext } from "./lib/quality.ts"
 import {
@@ -780,6 +780,11 @@ const parsnip: Plugin.Plugin = {
           await saveContinuity(ctx.storage, event.sessionID, next)
 
           await refreshStructure(ctx, state, event.sessionID)
+
+          // Request snapshot for the attribution report — read-only on the
+          // request; storage is the only write. Reflects what this request will
+          // actually carry (compressed and deduplicated results included).
+          await saveSnapshot(ctx.storage, event.sessionID, buildSnapshot(snapshotInputFromContext(event)))
 
           // INVARIANT: nothing above writes to event.messages / event.system /
           // event.tools. Keep it that way.

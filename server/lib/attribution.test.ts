@@ -6,6 +6,7 @@ import {
   SNAPSHOT_TOOL_LIMIT,
   UNATTRIBUTED_TOOL,
   asAttributionLedger,
+  asContextSnapshot,
   attributionKey,
   buildSnapshot,
   cleanToolName,
@@ -14,9 +15,13 @@ import {
   estimatedTokensOf,
   formatAttributionReport,
   loadAttribution,
+  loadSnapshot,
   recordAttribution,
   recordResult,
   saveAttribution,
+  saveSnapshot,
+  snapshotInputFromContext,
+  snapshotKey,
 } from "./attribution.ts"
 
 // --- ledger ------------------------------------------------------------------
@@ -363,4 +368,107 @@ test("cleanToolName: trims, and blanks land in (unknown)", () => {
   assert.equal(cleanToolName(" shell "), "shell")
   assert.equal(cleanToolName(""), "(unknown)")
   assert.equal(cleanToolName(undefined), "(unknown)")
+})
+
+// --- request snapshot extraction --------------------------------------------
+
+test("snapshotInputFromContext: classifies roles and part types into bins", () => {
+  const input = snapshotInputFromContext({
+    system: [{ type: "text", text: "s".repeat(100) }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "u".repeat(50) }, { type: "media", media: {} }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "a".repeat(30) },
+          { type: "reasoning", text: "r".repeat(20) },
+          { type: "tool-call", id: "c1", name: "shell", input: { command: "ls" } },
+          { type: "tool-result", id: "c1", name: "shell", result: { type: "text", value: "x".repeat(400) } },
+          {
+            type: "tool-result",
+            id: "c2",
+            name: "read",
+            result: {
+              type: "content",
+              value: [
+                { type: "text", text: "y".repeat(200) },
+                { type: "file", uri: "f", mime: "m" },
+              ],
+            },
+          },
+        ],
+      },
+      { role: "tool", content: [{ type: "tool-result", id: "c3", name: "websearch", result: { type: "json", value: "j".repeat(60) } }] },
+    ],
+    tools: { shell: { description: "run", input: {} } },
+  })
+
+  assert.equal(input.systemChars, 100)
+  assert.equal(input.userChars, 50 + "[media]".length)
+  assert.equal(input.assistantChars, 30, "tool-call arguments are deliberately skipped")
+  assert.equal(input.reasoningChars, 20)
+  assert.deepEqual(input.toolResults, [
+    { tool: "shell", chars: 400 },
+    { tool: "read", chars: 200 + "[file]".length },
+    { tool: "websearch", chars: 60 },
+  ])
+  assert.equal(
+    input.catalogueChars,
+    JSON.stringify({ shell: { description: "run", input: {} } }).length,
+  )
+})
+
+test("snapshotInputFromContext: unnamed results and odd shapes land safely", () => {
+  const input = snapshotInputFromContext({
+    system: ["plain string part", { text: "obj text" }, { type: "text" }, 42],
+    messages: [
+      { role: "assistant", content: [{ type: "tool-result", id: "c", result: { type: "json", value: { a: "b" } } }] },
+      { role: "user", content: [{ type: "text", text: "u" }] },
+      { role: "nonsense", content: [{ type: "text", text: "skip me" }] },
+      "junk",
+    ],
+  })
+  assert.equal(input.systemChars, "plain string part".length + "obj text".length)
+  assert.equal(input.userChars, 1)
+  assert.equal(input.assistantChars, 0)
+  assert.deepEqual(input.toolResults, [
+    { tool: UNATTRIBUTED_TOOL, chars: JSON.stringify({ a: "b" }).length },
+  ])
+  assert.equal(input.catalogueChars, 0, "no tools record means no catalogue chars")
+})
+
+test("snapshotKey / loadSnapshot / saveSnapshot / asContextSnapshot: round-trip, junk-safe", async () => {
+  const store = new Map<string, unknown>()
+  const storage = {
+    get: async (key: string) => store.get(key),
+    set: async (key: string, value: unknown) => void store.set(key, value),
+  } as unknown as StorageDomain
+
+  assert.equal(snapshotKey("ses_1"), "session:ses_1:snapshot")
+  assert.equal(await loadSnapshot(storage, "ses_1"), undefined)
+
+  const snapshot = buildSnapshot({
+    systemChars: 10,
+    userChars: 20,
+    assistantChars: 30,
+    reasoningChars: 40,
+    toolResults: [{ tool: "shell", chars: 50 }],
+    catalogueChars: 60,
+  })
+  await saveSnapshot(storage, "ses_1", snapshot)
+  assert.deepEqual(await loadSnapshot(storage, "ses_1"), snapshot)
+
+  await storage.set(snapshotKey("ses_2"), "junk")
+  assert.equal(await loadSnapshot(storage, "ses_2"), undefined)
+
+  const narrowed = asContextSnapshot({
+    systemChars: -5,
+    toolResults: [{ tool: "read", chars: 7 }, { tool: "", chars: 3 }, "nope", { tool: "x", chars: 0 }],
+  })
+  assert.ok(narrowed)
+  assert.equal(narrowed.systemChars, 0)
+  assert.deepEqual(narrowed.toolResults, [
+    { tool: "read", chars: 7 },
+    { tool: UNATTRIBUTED_TOOL, chars: 3 },
+  ])
 })
