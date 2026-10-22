@@ -152,6 +152,7 @@ is early and actively growing:
 | `npm run bench` | Mechanism ceiling on realistic shell output |
 | `npm run savings` | Live: real token usage, static chars removed, reread multiplier, and recall activity per session |
 | `npm run calibrate` | Empirical chars-per-token ratio from real usage, per model |
+| `npm run cost` | Live: actual dollar cost of the message history, per model — computed with DeepSeek's peak hours, against OpenCode's recorded cost |
 
 The known-answer eval computes salience rather than hand-tagging it, so a method
 can't win its own class by authorial accident. Its headline — no selector,

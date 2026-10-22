@@ -28,12 +28,13 @@ source wins. For the `parsnip_context` feature specifically, see
     └── bench/               measurement harness (not shipped behavior)
         ├── calibrate.ts     chars-per-token measurement
         ├── read-savings.ts  live savings + token reader
+        ├── cost.ts          live actual-cost reader (per model, peak hours applied)
         ├── compare.ts       cross-selector corpus comparison
         ├── eval.ts          known-answer recovery eval
         ├── threshold.ts     threshold sweep
         ├── run.ts           mechanism-ceiling bench
         ├── corpus.ts, facts.ts, export-facts.ts
-        └── lib/             pure bench helpers (metrics, proxies, recovery, reread, laya)
+        └── lib/             pure bench helpers (metrics, proxies, recovery, reread, cost, laya)
 
 ## Layering
 
@@ -205,6 +206,7 @@ modules; the OpenCode SDK is `import type` only, so nothing resolves at runtime
 |---|---|---|
 | `calibrate.ts` | `npm run calibrate` | empirical chars-per-token (per model, weighted/median) |
 | `read-savings.ts` | `npm run savings` | live token usage, chars removed, reread multiplier, recall activity |
+| `cost.ts` | `npm run cost` | actual dollar cost per model: computed (peak hours applied) vs off-peak vs OpenCode's recorded cost |
 | `compare.ts` | `npm run compare` | five selectors over a curated corpus: ratio + retention proxies |
 | `eval.ts` | `npm run eval` | known-answer recovery by computed salience class |
 | `threshold.ts` | `npm run sweep` | threshold sweep across nine settings |
@@ -214,6 +216,12 @@ modules; the OpenCode SDK is `import type` only, so nothing resolves at runtime
 `calibrate.ts` internals: `partChars`, `assistantChars`, `promptTokens`
 (per-message prompt size), the session walk, and `summarize` (weighted /
 median / p10 / p90, grouped by model).
+
+`cost.ts` internals: `toUsage` (one stored assistant message -> the usage the
+formula needs), the `aggregate` fold, and the report. The formula, the rate
+table, the DeepSeek peak rule and the context tiers live in
+`bench/lib/cost.ts` — see that module's header for why each bucket is kept
+separate.
 
 ## Tests
 
@@ -228,7 +236,7 @@ median / p10 / p90, grouped by model).
 | `server/lib/compaction.test.ts` | continuity block rendering |
 | `server/lib/config.test.ts` | config resolution + patches |
 | `server/lib/structure.test.ts` | classification + report assembly |
-| `bench/*.test.ts` | bench helpers (metrics, proxies, recovery, reread, laya) |
+| `bench/*.test.ts` | bench helpers (metrics, proxies, recovery, reread, cost, laya) |
 
 ## Data flows
 
