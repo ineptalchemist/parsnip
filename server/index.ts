@@ -659,7 +659,9 @@ function contextTool(ctx: Plugin.Context) {
       "Counters only — no tool text is stored or returned. topN widens the " +
       "per-tool lists (default 10, max 50). scope=session also includes a " +
       "compaction probe: whether the compaction hook fired and what it pushed " +
-      "into the summarizer's system prompt (hook-observed, not model output).",
+      "into the summarizer's system prompt (hook-observed, not model output). " +
+      "A push is not proof of survival — the line reports whether a sentinel " +
+      "verified the text reached the summary, or says survival is unverified.",
     input: {
       type: "object",
       properties: {

@@ -90,8 +90,13 @@ test("formatCompactionProbe: reports the firing and its observed outcome", () =>
   const text = formatCompactionProbe(probe)
   assert.match(text, /Compaction probe/)
   assert.match(text, /fired 1 time\(s\) · agent build/)
-  assert.match(text, /injected yes · block 320 chars · system 4 -> 5/)
+  assert.match(text, /pushed yes · block 320 chars · system 4 -> 5/)
   assert.match(text, /left to the main model/)
+  assert.match(
+    text,
+    /survival UNVERIFIED/,
+    "a push with no sentinel must not read as proof the block landed",
+  )
 })
 
 test("compactionProbeKey: is session-scoped and stable", () => {
@@ -161,10 +166,28 @@ test("formatCompactionProbe: shows the sentinel and its verdict", () => {
 
   const pending = formatCompactionProbe(probe)
   assert.match(pending, /sentinel PCOMPACT-abc12345 · awaiting summary/)
+  assert.doesNotMatch(pending, /UNVERIFIED/, "a sentinel in flight supersedes the unverified note")
 
   const survived = formatCompactionProbe(recordCompactionVerdict(probe, "PCOMPACT-abc12345"))
-  assert.match(survived, /sentinel PCOMPACT-abc12345 · survived/)
+  assert.match(survived, /sentinel PCOMPACT-abc12345 · SURVIVED into summary/)
 
   const dropped = formatCompactionProbe(recordCompactionVerdict(probe, "nothing here"))
-  assert.match(dropped, /sentinel PCOMPACT-abc12345 · NOT found/)
+  assert.match(dropped, /sentinel PCOMPACT-abc12345 · NOT FOUND in summary/)
+})
+
+test("formatCompactionProbe: no unverified note when nothing was pushed", () => {
+  const probe = recordCompactionProbe(undefined, {
+    injected: false,
+    blockChars: 0,
+    systemPartsBefore: 4,
+    systemPartsAfter: 4,
+    resultWasSet: false,
+  })
+  const text = formatCompactionProbe(probe)
+  assert.match(text, /pushed no/)
+  assert.doesNotMatch(
+    text,
+    /UNVERIFIED/,
+    "nothing was injected, so there is no survival question to raise",
+  )
 })

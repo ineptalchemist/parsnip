@@ -1062,7 +1062,7 @@ test("parsnip_context: session scope includes the compaction probe, current does
   const session = await tool.execute({ scope: "session" }, { sessionID: "ses_test" })
   assert.match(session.content[0].text, /Compaction probe \(last firing/)
   assert.match(session.content[0].text, /fired 2 time\(s\) · agent build/)
-  assert.match(session.content[0].text, /injected yes · block 240 chars · system 4 -> 5/)
+  assert.match(session.content[0].text, /pushed yes · block 240 chars · system 4 -> 5/)
 
   const current = await tool.execute({ scope: "current" }, { sessionID: "ses_test" })
   assert.ok(!current.content[0].text.includes("Compaction probe"), "probe hidden for current scope")

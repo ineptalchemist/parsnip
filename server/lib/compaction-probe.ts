@@ -152,13 +152,20 @@ export function recordCompactionVerdict(
 /**
  * Render the probe for the report. Returns an empty string when there is
  * nothing to show yet, so the formatter can skip the section entirely.
+ *
+ * Wording distinguishes the *push* (deterministic — we pushed text into the
+ * outgoing system prompt and can prove it) from *survival* (whether the
+ * summarizer kept any of it — only knowable with a sentinel). A probe with no
+ * sentinel says so outright rather than letting "pushed yes" read as success:
+ * a pushed block that the summarizer discards entirely looks identical to one
+ * that carries the task forward.
  */
 export function formatCompactionProbe(probe: CompactionProbe | undefined): string {
   if (!probe || probe.fires === 0) return ""
   const lines: string[] = [
-    "Compaction probe (last firing — hook observed, not model output)",
+    "Compaction probe (last firing — push observed; survival needs a sentinel)",
     `  fired ${probe.fires} time(s)${probe.agent ? ` · agent ${probe.agent}` : ""}`,
-    `  injected ${probe.injected ? "yes" : "no"} · block ${probe.blockChars} chars · system ${probe.systemPartsBefore} -> ${probe.systemPartsAfter}`,
+    `  pushed ${probe.injected ? "yes" : "no"} · block ${probe.blockChars} chars · system ${probe.systemPartsBefore} -> ${probe.systemPartsAfter}`,
     `  summary ownership ${probe.resultWasSet ? "pre-set (skipped)" : "left to the main model"}`,
   ]
   if (probe.sentinel) {
@@ -166,9 +173,13 @@ export function formatCompactionProbe(probe: CompactionProbe | undefined): strin
       probe.sentinelFound === undefined
         ? "awaiting summary"
         : probe.sentinelFound
-          ? "survived"
-          : "NOT found"
+          ? "SURVIVED into summary"
+          : "NOT FOUND in summary"
     lines.push(`  sentinel ${probe.sentinel} · ${verdict}`)
+  } else if (probe.injected) {
+    // The push happened but nothing proves the summarizer kept it. Say so,
+    // instead of leaving "pushed yes" to be read as the block landing.
+    lines.push("  survival UNVERIFIED (probe off — no sentinel was injected; this block may not be in the summary)")
   }
   return lines.join("\n")
 }
